@@ -43,6 +43,10 @@ def make_layout(cfg: SynthConfig, rng: np.random.Generator, seed: int, index: in
     lc = cfg.layout
     if lc.source == "simscan":
         return LayoutGenerator(lc, rng).generate()
+    if lc.source == "apartment":
+        from .apartment import ApartmentGenerator
+
+        return ApartmentGenerator(lc, rng).generate()
     if lc.source == "datasetgen":
         from .datasetgen_adapter import extract_plan, layout_from_plan, load_datasetgen
 

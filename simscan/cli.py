@@ -28,6 +28,28 @@ def _parse_set(items: list[str]) -> dict:
     return out
 
 
+def _plans(args) -> None:
+    from pathlib import Path
+
+    from .generate import make_layout, scene_rng
+    from .interior import Furnisher
+    from .render import render_many, render_plan
+
+    cfg = load_config(args.config, _parse_set(args.set))
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    layouts = []
+    for i in range(args.count):
+        rng = scene_rng(args.seed, i)
+        lay = make_layout(cfg, rng, args.seed, i)
+        Furnisher(cfg.interior, rng).furnish(lay)
+        lay.save_json(out / f"plan_{i:04d}.json")
+        render_plan(lay, out / f"plan_{i:04d}.png")
+        layouts.append(lay)
+    render_many(layouts, out / "sheet.png")
+    print(out / "sheet.png")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="simscan")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -41,7 +63,29 @@ def main(argv: list[str] | None = None) -> None:
     g.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     d = sub.add_parser("dump-config", help="напечатать конфигурацию по умолчанию (YAML)")
     d.add_argument("--config")
+    pl = sub.add_parser("plans", help="только планировки + рендер (без сканирования)")
+    pl.add_argument("--out", required=True)
+    pl.add_argument("--count", type=int, default=6)
+    pl.add_argument("--seed", type=int, default=0)
+    pl.add_argument("--config")
+    pl.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    r = sub.add_parser("render", help="отрисовать layout.json сцены")
+    r.add_argument("scene_dir")
     args = ap.parse_args(argv)
+
+    if args.cmd == "plans":
+        _plans(args)
+        return
+    if args.cmd == "render":
+        from pathlib import Path
+
+        from .layout import Layout
+        from .render import render_plan
+
+        d = Path(args.scene_dir)
+        render_plan(Layout.load_json(d / "layout.json"), d / "plan.png")
+        print(d / "plan.png")
+        return
 
     if args.cmd == "dump-config":
         cfg = load_config(args.config)

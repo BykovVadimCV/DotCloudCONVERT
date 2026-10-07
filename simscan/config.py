@@ -22,7 +22,9 @@ Range = tuple[float, float]
 
 @dataclass
 class LayoutConfig:
-    source: str = "simscan"             # "simscan" - свой генератор, "datasetgen" - ReFloorBRUSNIKA
+    # "apartment" - квартиры (ProcTHOR-подобный рост комнат, simscan/apartment.py);
+    # "simscan" - простое BSP-разбиение; "datasetgen" - планировки ReFloorBRUSNIKA
+    source: str = "apartment"
     datasetgen_path: str = ""           # путь к datasetgen.py или к его каталогу
     datasetgen_strategies: tuple[str, ...] = ("central", "linear", "radial", "graph", "open_plan",
                                               "asymmetric", "courtyard", "spine")
@@ -30,6 +32,18 @@ class LayoutConfig:
     datasetgen_min_room_m2: float = 0.5           # меньше - пустота между стенами, не помещение
     datasetgen_balcony_probability: float = 0.7
     parapet_height_m: Range = (1.0, 1.1)          # ограждение балкона
+    # source = "apartment": квартиры в секционном доме (simscan/apartment.py)
+    apartment_cell_m: float = 0.3
+    apartment_candidates: int = 40                # кандидатов на контур, берётся лучший
+    apartment_shell_trials: int = 30
+    apartment_zone_trials: int = 12               # нарезок каждой зоны, лучшая из 3 удачных
+    apartment_keep_best_of: int = 5               # удачных планов на контур, берётся лучший
+    apartment_facade_weights: tuple[float, float, float] = (0.5, 0.25, 0.25)  # один фасад / сквозная / угловая
+    apartment_p_cut: float = 0.3                  # угловой вырез контура у входа
+    apartment_p_loggia: float = 0.6
+    apartment_p_glazed_loggia: float = 0.5
+    apartment_party_wall_m: tuple[float, ...] = (0.16, 0.18, 0.2, 0.24)
+    apartment_p_bearing_wall: float = 0.5
     parapet_thickness_m: float = 0.12
     footprint_x_m: Range = (6.0, 16.0)
     footprint_y_m: Range = (5.0, 12.0)

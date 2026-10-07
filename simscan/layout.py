@@ -95,6 +95,7 @@ class Room:
     # (x0, y0, x1, y1, nx, ny), нормаль внутрь помещения - для плинтусов.
     region: list = field(default_factory=list)
     wall_edges: list = field(default_factory=list)
+    name: str = ""                              # подпись на плане: «Кухня», «Спальня»...
 
     @property
     def area(self) -> float:
