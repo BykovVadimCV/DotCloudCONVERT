@@ -40,74 +40,8 @@ INC_BINS = (0.0, 30.0, 50.0, 65.0, 75.0, 85.0)
 
 
 # ----------------------------------------------------------------------
-# Заголовок
+# Заголовок и чтение - e57read.py (чистый numpy, без pye57)
 # ----------------------------------------------------------------------
-
-def _cast(node):
-    from pye57 import libe57
-
-    T = libe57.NodeType
-    cast = {T.E57_BLOB: libe57.BlobNode, T.E57_COMPRESSED_VECTOR: libe57.CompressedVectorNode,
-            T.E57_FLOAT: libe57.FloatNode, T.E57_INTEGER: libe57.IntegerNode,
-            T.E57_SCALED_INTEGER: libe57.ScaledIntegerNode, T.E57_STRING: libe57.StringNode,
-            T.E57_STRUCTURE: libe57.StructureNode, T.E57_VECTOR: libe57.VectorNode}
-    if not isinstance(node, libe57.Node):               # уже типизированный узел
-        return node
-    return cast[node.type()](node)
-
-
-def node_tree(node, depth: int = 0, max_children: int = 64):
-    """Дерево заголовка E57 без данных точек и снимков; строки с «serial» вычищаются."""
-    from pye57 import libe57
-
-    n = _cast(node)
-    name = node.elementName()
-    if isinstance(n, libe57.StringNode):
-        return "<скрыто>" if "serial" in name.lower() else n.value()
-    if isinstance(n, (libe57.FloatNode, libe57.IntegerNode)):
-        return n.value()
-    if isinstance(n, libe57.ScaledIntegerNode):
-        return {"scaled_integer": n.scaledValue(), "scale": n.scale(), "offset": n.offset(),
-                "min": n.minimum(), "max": n.maximum()}
-    if isinstance(n, libe57.BlobNode):
-        return {"blob_bytes": int(n.byteCount())}
-    if isinstance(n, libe57.CompressedVectorNode):
-        return {"records": int(n.childCount())}                    # типы полей - field_types
-    out = {} if isinstance(n, libe57.StructureNode) else []
-    for i in range(min(n.childCount(), max_children)):
-        c = n.get(i)
-        v = node_tree(c, depth + 1)
-        if isinstance(out, dict):
-            out[c.elementName()] = v
-        else:
-            out.append(v)
-    if n.childCount() > max_children:
-        out = {"items": out, "truncated": int(n.childCount())} if isinstance(out, list) else out
-    return out
-
-
-def field_types(header) -> dict:
-    from pye57 import libe57
-
-    proto = libe57.StructureNode(header.points.prototype())
-    out = {}
-    for i in range(proto.childCount()):
-        c = _cast(proto.get(i))
-        name = proto.get(i).elementName()
-        if isinstance(c, libe57.FloatNode):
-            out[name] = "float64" if c.precision() == libe57.FloatPrecision.E57_DOUBLE else "float32"
-        elif isinstance(c, libe57.ScaledIntegerNode):
-            out[name] = f"scaled_integer(scale={c.scale():g}, bits~{_bits(c.minimum(), c.maximum())})"
-        elif isinstance(c, libe57.IntegerNode):
-            out[name] = f"integer[{c.minimum()}..{c.maximum()}]"
-        else:
-            out[name] = type(c).__name__
-    return out
-
-
-def _bits(lo, hi) -> int:
-    return int(math.ceil(math.log2(max(hi - lo + 1, 2))))
-
 
 def _blob_bytes(tree) -> int:
     if isinstance(tree, dict):
@@ -120,21 +54,6 @@ def _blob_bytes(tree) -> int:
 # ----------------------------------------------------------------------
 # Потоковое чтение
 # ----------------------------------------------------------------------
-
-def iter_chunks(e57, index: int, fields: list[str], chunk: int):
-    """Куски станции; массивы - представления буфера, следующий кусок их перезапишет."""
-    header = e57.get_header(index)
-    data, buffers = e57.make_buffers(fields, chunk)
-    reader = header.points.reader(buffers)
-    try:
-        while True:
-            n = reader.read()
-            if n == 0:
-                break
-            yield {k: v[:n] for k, v in data.items()}
-    finally:
-        reader.close()
-
 
 def _quat_R(q) -> np.ndarray:
     w, x, y, z = (float(v) for v in q)
@@ -326,7 +245,7 @@ def inspect_e57(path, out_dir, chunk: int = 2_000_000, keep_points: int = 1_500_
                 keep_pairs: int = 300_000, sample: bool = True, sample_voxel_m: float = 0.04,
                 sample_per_scan: int = 200_000, figures: bool = True, zip_result: bool = True,
                 log=print) -> dict:
-    import pye57
+    from .e57read import E57Reader
 
     path, out = Path(path), Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -334,40 +253,42 @@ def inspect_e57(path, out_dir, chunk: int = 2_000_000, keep_points: int = 1_500_
     t_all = time.perf_counter()
     report = {"file": {"name": path.name, "bytes": path.stat().st_size}, "scans": []}
     stations, samples = [], []
-    with pye57.E57(str(path)) as e57:
-        root = e57.root
-        tree = node_tree(root)
+    with E57Reader(path) as e57:
+        tree = e57.tree
         hdr = {k: tree.get(k) for k in ("formatName", "versionMajor", "versionMinor",
                                          "e57LibraryVersion", "coordinateMetadata")
                if isinstance(tree, dict) and k in tree}
         images = tree.get("images2D", []) if isinstance(tree, dict) else []
         report["file"].update(hdr)
+        report["file"]["page_size"] = e57.page
         report["images2D"] = {"count": len(images) if isinstance(images, list) else None,
                               "bytes": _blob_bytes(images)}
         total_points = 0
-        for i in range(e57.scan_count):
-            h = e57.get_header(i)
-            fields = [f for f in h.point_fields if f in SUPPORTED]
+        for i, h in enumerate(e57.scans):
+            fields = [f for f in h.field_names if f in SUPPORTED]
             cart = all(f in fields for f in ("cartesianX", "cartesianY", "cartesianZ"))
             if not cart:
                 fields = [f for f in fields if not f.startswith("cartesian")]
-            n_pts = h.point_count
+            n_pts = h.points
             total_points += n_pts
-            scan_tree = tree["data3D"][i] if isinstance(tree.get("data3D"), list) else {}
+            scan_tree = h.tree
             rows = cols = None
-            try:
-                ib = h.indexBounds
-                rows = int(ib["rowMaximum"].value()) - int(ib["rowMinimum"].value()) + 1
-                cols = int(ib["columnMaximum"].value()) - int(ib["columnMinimum"].value()) + 1
-            except Exception:                           # noqa: BLE001
-                pass
-            if "rowIndex" not in fields:
+            ib = h.index_bounds
+            if isinstance(ib, dict) and "rowMaximum" in ib and "columnMaximum" in ib:
+                rows = int(ib["rowMaximum"]) - int(ib.get("rowMinimum", 0)) + 1
+                cols = int(ib["columnMaximum"]) - int(ib.get("columnMinimum", 0)) + 1
+            if rows is None and "rowIndex" in fields and "columnIndex" in fields:
+                fs = {f.name: f for f in h.fields}            # нет indexBounds - по прототипу
+                rows = fs["rowIndex"].maximum - fs["rowIndex"].minimum + 1
+                cols = fs["columnIndex"].maximum - fs["columnIndex"].minimum + 1
+            if "rowIndex" not in fields or "columnIndex" not in fields:
                 rows = cols = None
-            R = _quat_R(h.rotation) if h.has_pose() else np.eye(3)
-            t = np.asarray(h.translation, float) if h.has_pose() else np.zeros(3)
+            has_pose = h.rotation is not None or h.translation is not None
+            R = _quat_R(h.rotation) if h.rotation is not None else np.eye(3)
+            t = np.asarray(h.translation, float) if h.translation is not None else np.zeros(3)
             st = ScanStats(n_pts, rows, cols, keep_points, keep_pairs, rng)
             t0 = time.perf_counter()
-            for d in iter_chunks(e57, i, fields, chunk):
+            for d in e57.iter_points(i, fields, chunk):
                 if cart:
                     xyz = np.c_[d["cartesianX"], d["cartesianY"], d["cartesianZ"]]
                     inv = d.get("cartesianInvalidState")
@@ -381,21 +302,23 @@ def inspect_e57(path, out_dir, chunk: int = 2_000_000, keep_points: int = 1_500_
             secs = time.perf_counter() - t0
             xyz_l, inten = st.points()
             r_l = np.linalg.norm(xyz_l, axis=1)
-            world_coords = bool(len(r_l) and not h.has_pose() and np.median(r_l) > 50)
+            world_coords = bool(len(r_l) and not has_pose and np.median(r_l) > 50)
             xyz_w = (xyz_l.astype(np.float64) @ R.T + t)
             stations.append({"center": t, "points": xyz_w})
             tilt = math.degrees(math.acos(np.clip(R[2, 2], -1, 1)))
             info = {
-                "index": i, "name": scan_tree.get("name") if isinstance(scan_tree, dict) else None,
+                "index": i, "name": h.name,
                 "points": int(n_pts), "valid": int(st.valid),
                 "valid_fraction": round(st.valid / max(st.n, 1), 4),
-                "fields": field_types(h), "has_color": "colorRed" in h.point_fields,
+                "fields": {f.name: f.describe() for f in h.fields},
+                "has_color": "colorRed" in h.field_names,
                 "grid_rows_cols": [rows, cols] if rows else None,
                 "grid_fill": round(n_pts / (rows * cols), 4) if rows else None,
                 "azimuth_step_deg": round(float(np.median(st.az_step)), 5) if st.az_step else None,
                 "elevation_step_deg": round(float(np.median(st.el_step)), 5) if st.el_step else None,
                 "pose": {"translation": t.round(4).tolist(),
-                         "rotation_wxyz": [round(float(v), 6) for v in h.rotation]} if h.has_pose() else None,
+                         "rotation_wxyz": None if h.rotation is None else
+                         [round(float(v), 6) for v in h.rotation]} if has_pose else None,
                 "tilt_deg": round(tilt, 3),
                 "points_in_world_coords": world_coords,
                 "range_m": {"min": round(float(r_l.min()), 3) if len(r_l) else None,
@@ -427,7 +350,7 @@ def inspect_e57(path, out_dir, chunk: int = 2_000_000, keep_points: int = 1_500_
             report["scans"].append(info)
             st.kept = []                                # точки уже в stations
             samples.append((st, inten))
-            log(f"станция {i + 1}/{e57.scan_count}: {n_pts / 1e6:.1f} млн точек, {secs:.0f} с")
+            log(f"станция {i + 1}/{len(e57.scans)}: {n_pts / 1e6:.1f} млн точек, {secs:.0f} с")
     total_s = time.perf_counter() - t_all
     img = report["images2D"]["bytes"] or 0
     report["file"]["points_total"] = int(total_points)

@@ -8,6 +8,22 @@
 
 ## Установка
 
+Две разные установки:
+
+- **Только анализ реального E57** (`inspect-e57`) — без Open3D и pye57, любой Python 3.10–3.14,
+  в том числе Intel-Mac и Windows:
+
+  ```bash
+  pip install -r requirements-inspect.txt
+  python -m simscan inspect-e57 путь/к/файлу.e57
+  ```
+
+- **Генерация синтетики** — нужен Python 3.10–3.12: у Open3D нет сборок под 3.13+ на всех
+  платформах, а у pye57 на PyPI нет сборок под Intel-Mac (только Apple Silicon, Linux,
+  Windows). На Intel-Mac генерацию проще запускать на Linux или в Colab.
+
+Полная установка:
+
 ```bash
 python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -36,12 +52,13 @@ python -m simscan pair D:/synth/scene_00000 D:/synth/scene_00001 --out pairs.png
 извлекает программа, а пересылается маленький архив:
 
 ```bash
-pip install -r requirements.txt                   # на машине, где лежит скан
+pip install -r requirements-inspect.txt           # на машине, где лежит скан
 python -m simscan inspect-e57 D:/scans/kvartira.e57          # -> D:/scans/kvartira_report.zip
 python -m simscan inspect-e57 D:/scans/kvartira.e57 --no-sample   # без прореженного облака
 ```
 
-Файл читается кусками (`--chunk`, по умолчанию 2 млн точек): память - сотни МБ при любом
+E57 читается собственным читателем на numpy (`simscan/e57read.py`, сверен с libE57 на float,
+scaled integer, цвете и полях любой разрядности), кусками (`--chunk`, по умолчанию 2 млн точек): память - сотни МБ при любом
 размере, скорость ~0,8-1 млн точек/с (станция Dense+ 90 млн точек - около 2 минут).
 В архиве (1-30 МБ):
 

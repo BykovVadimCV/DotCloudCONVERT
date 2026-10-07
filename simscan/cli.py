@@ -12,14 +12,13 @@ from __future__ import annotations
 import argparse
 import sys
 
-import yaml
-
-from .config import config_to_dict, load_config
-from .generate import generate_dataset
+# тяжёлые зависимости (Open3D, pye57) импортируются внутри команд: inspect-e57 работает без них
 
 
 def _parse_set(items: list[str]) -> dict:
     """--set a.b=1 --set c.d=[1,2] -> вложенный словарь (значения разбираются как YAML)."""
+    import yaml
+
     out: dict = {}
     for item in items:
         key, _, value = item.partition("=")
@@ -37,6 +36,8 @@ def _plans(args) -> None:
     from .generate import make_layout, scene_rng
     from .interior import Furnisher
     from .render import render_many, render_plan
+
+    from .config import load_config
 
     cfg = load_config(args.config, _parse_set(args.set))
     out = Path(args.out)
@@ -150,9 +151,16 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.cmd == "dump-config":
+        import yaml
+
+        from .config import config_to_dict, load_config
+
         cfg = load_config(args.config)
         yaml.safe_dump(config_to_dict(cfg), sys.stdout, allow_unicode=True, sort_keys=False)
         return
+    from .config import load_config
+    from .generate import generate_dataset
+
     cfg = load_config(args.config, _parse_set(args.set))
     results = generate_dataset(cfg, args.out, args.count, args.seed, args.start, args.workers)
     failed = [r for r in results if "error" in r]
