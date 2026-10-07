@@ -25,10 +25,11 @@ from .e57io import write_e57, write_merged_e57
 from .groundtruth import (UNET_VALUES, build_masks, describe, frame_for, save_gt, unet_frame,
                           unet_mask)
 from .interior import Furnisher
-from .layout import LayoutGenerator
+from .layout import Box, LayoutGenerator
 from .preview import render_preview
 from .scanner import ScanSimulator, people_for_station, place_stations, sample_effect_params
 from .scene import build_scene
+from . import realism
 from .transform import WorldTransform, small_rotation
 
 
@@ -68,11 +69,19 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
     (out / "labels").mkdir(parents=True, exist_ok=True)
 
     layout = make_layout(cfg, rng, seed, index)
+    real = realism.sample_params(cfg.realism, rng)
+    if real["enabled"]:
+        realism.jitter_thickness(layout, cfg.realism.thickness_jitter_mm, rng)
+        layout.meta["warp"] = real["warp"]
     grids = Furnisher(cfg.interior, rng).furnish(layout)
     stations = place_stations(layout, grids, cfg.scanner, rng)
     if not stations:
         raise RuntimeError("не удалось поставить ни одной станции")
-    mesh, solids = build_scene(layout)
+    mesh, solids = build_scene(layout, real.get("tessellation_m"))
+    realism.apply_to_mesh(mesh, real)
+    for st in stations:                     # станции живут в той же (сдвинутой) СК, что и сцена
+        xy = realism.warp_xy(np.array(st.position[:2])[None], real)[0]
+        st.position = (float(xy[0]), float(xy[1]), st.position[2])
 
     ex = cfg.export
     world = WorldTransform(
@@ -90,6 +99,10 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
             lo, hi = cfg.effects.people_per_station
             people = people_for_station(st, grids, int(rng.integers(lo, hi + 1)), rng,
                                         instance0=1_000_000 + 100 * k)
+            for person in people:                # люди стоят в сдвинутой СК, как и сцена
+                cx, cy = realism.warp_xy(np.array(person.box.center[:2])[None], real)[0]
+                person.box = Box((float(cx), float(cy), person.box.center[2]), person.box.size,
+                                 person.box.yaw)
         scan = sim.scan(st, people)
         # истинная поза в СК объекта
         R_true = world.R @ st.rotation()
@@ -146,6 +159,7 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
     doc["meta"].update({
         "simscan_version": __version__, "seed": seed, "index": index,
         "layout_to_world": world.to_dict(), "effects_sampled": params,
+        "realism": real,
         "scanner": {"nrow": sim.nrow, "ncol": sim.ncol,
                     "angular_step_deg": cfg.scanner.angular_step_deg},
         "config": config_to_dict(cfg),
@@ -160,6 +174,10 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
                "points_valid": int(sum(s.n_valid for s in scans))}
     if ex.preview:
         summary.update(render_preview(out / "scan.e57", masks, frame, world, out / "preview.png"))
+    if ex.debug:
+        from .debug import debug_scene
+
+        debug_scene(out)
     summary["seconds"] = round(time.perf_counter() - t_start, 2)
     return summary
 

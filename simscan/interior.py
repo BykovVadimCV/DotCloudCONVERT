@@ -10,6 +10,7 @@ import math
 
 import numpy as np
 
+from . import furniture as fu
 from .config import InteriorConfig
 from .layout import Box, Item, Layout, Room, Wall
 
@@ -155,8 +156,35 @@ class Furnisher:
             return self._u((0.03, 0.1))
         return self._u((0.15, 0.8))
 
-    def _add(self, layout: Layout, kind: str, label: str, boxes, refl: float, room_id) -> None:
-        layout.items.append(Item(len(layout.items), kind, label, list(boxes), float(refl), room_id))
+    def _add(self, layout: Layout, kind: str, label: str, boxes, refl: float, room_id,
+             prims=None, transmit: float = 0.0) -> None:
+        layout.items.append(Item(len(layout.items), kind, label, list(boxes), float(refl), room_id,
+                                 list(prims or []), float(transmit)))
+
+    # --- внешние модели ------------------------------------------------
+    def _assets(self) -> dict:
+        if not hasattr(self, "_asset_index"):
+            from pathlib import Path
+
+            idx = {}
+            root = Path(self.cfg.asset_dir) if self.cfg.asset_dir else None
+            if root and root.is_dir():
+                for sub in root.iterdir():
+                    files = sorted(str(f) for f in sub.glob("*")
+                                   if f.suffix.lower() in (".obj", ".ply", ".stl", ".glb", ".gltf", ".off"))
+                    if sub.is_dir() and files:
+                        idx[sub.name] = files
+            self._asset_index = idx
+        return self._asset_index
+
+    def _maybe_asset(self, kind: str, base: Box):
+        """Заменить предмет внешней моделью, вписанной в его габарит (или None)."""
+        files = self._assets().get(kind)
+        if not files or self.rng.random() >= self.cfg.p_asset:
+            return None
+        path = files[int(self.rng.integers(len(files)))]
+        return [{"type": "mesh", "path": path, "center": list(base.center), "size": list(base.size),
+                 "yaw": base.yaw, "z_up": False}]
 
     # ------------------------------------------------------------------
     def furnish(self, layout: Layout) -> dict[int, RoomGrid]:
@@ -169,12 +197,17 @@ class Furnisher:
         self._set_doors(layout)
         grids = {r.id: RoomGrid(r) for r in layout.rooms}
         self._reserve_openings(layout, grids)
+        if self.cfg.door_frames:
+            self._door_frames(layout)
         for room in layout.rooms:
             g = grids[room.id]
             self._wall_fixtures(layout, room, g)
             self._columns(layout, room, g)
+            self._risers(layout, room, g)
             if self.cfg.furniture:
                 self._furniture(layout, room, g)
+                self._extras(layout, room, g)
+            self._curtains(layout, room)
             self._clutter(layout, room, g)
         if self.cfg.baseboards:
             for room in layout.rooms:
@@ -221,9 +254,12 @@ class Furnisher:
                 face = side * wall.thickness / 2
                 w = min(o.width, 1.2)
                 h = min(0.5, o.z0 - 0.15)
-                center = wall.point(o.s, face + side * 0.08)
-                box = Box((*center, 0.1 + h / 2), (w, 0.08, h), wall.yaw)
-                self._add(layout, "radiator", "fixture", [box], self._u((0.6, 0.9)), room.id)
+                if cfg.procedural:
+                    boxes = fu.radiator(wall, o.s, face, side, w, h, rng)
+                else:
+                    center = wall.point(o.s, face + side * 0.08)
+                    boxes = [Box((*center, 0.1 + h / 2), (w, 0.08, h), wall.yaw)]
+                self._add(layout, "radiator", "fixture", boxes, self._u((0.6, 0.9)), room.id)
                 g.mark(wall_rect(wall, o.s - w / 2, o.s + w / 2, face, face + side * 0.15), 0.0)
 
         sides = ["B", "T", "L", "R"]
@@ -307,8 +343,9 @@ class Furnisher:
             rect, base = _box_on_side(room.clear, side, pos, w, d, 0.0, h)
             if not g.is_free(rect, tall):
                 continue
-            boxes = self._compose(kind, base, w, d, h)
-            self._add(layout, kind, "furniture", boxes, refl, room.id)
+            prims = self._maybe_asset(kind, base)
+            boxes = [] if prims else self._compose(kind, base, w, d, h)
+            self._add(layout, kind, "furniture", boxes, refl, room.id, prims)
             g.mark(rect)
             if kind == "counter" and room.ceiling_z > 2.3:
                 upper = _local_box(base, 0.0, -d / 2 + 0.175, 1.45, (w, 0.35, 0.7))
@@ -318,6 +355,12 @@ class Furnisher:
 
     def _compose(self, kind: str, base: Box, w: float, d: float, h: float) -> list[Box]:
         """Составные предметы - несколько параллелепипедов."""
+        if self.cfg.procedural:
+            make = {"sofa": fu.sofa, "bed": fu.bed, "shelf": fu.shelf, "wardrobe": fu.wardrobe,
+                    "tv_stand": fu.tv_stand, "counter": fu.counter, "shoe_rack": fu.shoe_rack,
+                    "desk": fu.table}.get(kind)
+            if make is not None:
+                return make(base, self.rng)
         if kind == "sofa":
             seat = _local_box(base, 0, 0.1, 0.0, (w, d - 0.2, 0.45))
             back = _local_box(base, 0, -d / 2 + 0.1, 0.0, (w, 0.2, h))
@@ -343,15 +386,25 @@ class Furnisher:
         x, y = pts[int(rng.integers(len(pts)))]
         yaw = float(rng.uniform(-0.3, 0.3)) + (math.pi / 2 if rng.random() < 0.5 else 0.0)
         base = Box((x, y, h / 2), (w, d, h), yaw)
-        boxes = _table_boxes(base, w, d, h)
+        prims = self._maybe_asset("dining_table", base)
+        boxes = [] if prims else (fu.table(base, rng) if self.cfg.procedural
+                                  else _table_boxes(base, w, d, h))
+        self._add(layout, "dining_table", "furniture", boxes, self._refl(), room.id, prims)
         for k in range(int(rng.integers(0, 5))):
             du = (k % 2 * 2 - 1) * w / 4
             dv = (1 if k < 2 else -1) * (d / 2 + 0.3)
-            seat = _local_box(base, du, dv, 0.0, (0.45, 0.45, 0.45))
-            back_dv = dv + np.sign(dv) * 0.2
-            back = _local_box(base, du, back_dv, 0.0, (0.45, 0.05, 0.9))
-            boxes += [seat, back]
-        self._add(layout, "dining_table", "furniture", boxes, self._refl(), room.id)
+            if self.cfg.procedural:
+                # стул «спиной» от стола: ось dv стула смотрит к столу
+                c = _local_box(base, du, dv, 0.0, (0.44, 0.42, 0.9)).center
+                cyaw = base.yaw + (0.0 if dv < 0 else math.pi)
+                cbase = Box((c[0], c[1], 0.45), (0.44, 0.42, 0.9), cyaw)
+                cprims = self._maybe_asset("chair", cbase)
+                cboxes = [] if cprims else fu.chair(cbase, rng)
+                self._add(layout, "chair", "furniture", cboxes, self._refl(), room.id, cprims)
+            else:
+                seat = _local_box(base, du, dv, 0.0, (0.45, 0.45, 0.45))
+                back = _local_box(base, du, dv + np.sign(dv) * 0.2, 0.0, (0.45, 0.05, 0.9))
+                self._add(layout, "chair", "furniture", [seat, back], self._refl(), room.id)
         r = max(w, d) / 2 + 0.6
         g.mark((x - r, y - r, x + r, y + r), 0.0)
 
@@ -367,6 +420,145 @@ class Furnisher:
             box = Box((x, y, h / 2), (s, self._u((0.25, 0.6)), h), float(self.rng.uniform(0, math.pi)))
             self._add(layout, "box", "clutter", [box], self._refl(), room.id)
             g.mark((x - s / 2, y - s / 2, x + s / 2, y + s / 2), 0.1)
+
+    # --- архитектурные детали и предметы, которых нет в коробочной модели ----
+    def _door_frames(self, layout: Layout) -> None:
+        """Дверная коробка внутри проёма и наличники на обеих гранях стены."""
+        rng = self.rng
+        for o in layout.openings:
+            if o.kind == "window" or (o.kind == "passage" and rng.random() < 0.5):
+                continue
+            wall = layout.wall(o.wall_id)
+            t, yaw = wall.thickness, wall.yaw
+            sa, sb = o.s - o.width / 2, o.s + o.width / 2
+            boxes = []
+
+            def piece(s0, s1, off, depth, z0, z1):
+                c = wall.point((s0 + s1) / 2, off)
+                boxes.append(Box((c[0], c[1], (z0 + z1) / 2), (s1 - s0, depth, z1 - z0), yaw))
+
+            lw, aw, ad = 0.03, 0.07, 0.012
+            piece(sa, sa + lw, 0.0, t + 0.01, 0.0, o.z1)                 # коробка
+            piece(sb - lw, sb, 0.0, t + 0.01, 0.0, o.z1)
+            piece(sa, sb, 0.0, t + 0.01, o.z1 - lw, o.z1)
+            for side in (-1, 1):                                         # наличники
+                off = side * (t / 2 + ad / 2)
+                piece(sa - aw + 0.015, sa + 0.015, off, ad, 0.0, o.z1 + aw - 0.015)
+                piece(sb - 0.015, sb + aw - 0.015, off, ad, 0.0, o.z1 + aw - 0.015)
+                piece(sa - aw + 0.015, sb + aw - 0.015, off, ad, o.z1 - 0.015, o.z1 + aw - 0.015)
+            self._add(layout, "door_frame", "door", boxes, layout.materials.get("door", 0.5), None)
+
+    def _curtains(self, layout: Layout, room: Room) -> None:
+        """Шторы (непрозрачные) и тюль (пропускает часть лучей) на окнах жилых комнат и кухни."""
+        cfg, rng = self.cfg, self.rng
+        if room.kind not in ("room", "kitchen"):
+            return
+        for o in layout.openings:
+            if o.kind != "window" or room.id not in o.rooms:
+                continue
+            wall = layout.wall(o.wall_id)
+            side = room_side(wall, room, o.s)
+            face = side * wall.thickness / 2
+            rail = min(room.ceiling_z - 0.03, o.z1 + self._u((0.1, 0.3)))
+            s0 = o.s - o.width / 2 - self._u((0.1, 0.4))
+            s1 = o.s + o.width / 2 + self._u((0.1, 0.4))
+            bottom = max(0.01, o.z0 - 0.02) if room.kind == "kitchen" and rng.random() < 0.6 \
+                else self._u((0.01, 0.04))
+            if rng.random() < cfg.p_tulle:
+                off = face + side * self._u((0.06, 0.1))
+                prim = {"type": "curtain", "p0": wall.point(s0, off).tolist(),
+                        "p1": wall.point(s1, off).tolist(), "z0": bottom, "z1": rail,
+                        "amp": self._u((0.015, 0.035)), "period": self._u((0.08, 0.14))}
+                self._add(layout, "tulle", "curtain", [], self._u((0.4, 0.8)), room.id, [prim],
+                          transmit=self._u(cfg.tulle_transmit))
+            if rng.random() < cfg.p_curtains:
+                off = face + side * self._u((0.11, 0.17))
+                span = s1 - s0
+                closed = rng.random() < 0.15
+                prims = []
+                for k, (a, sign) in enumerate(((s0, 1), (s1, -1))):
+                    frac = 0.5 if closed else self._u((0.12, 0.45))
+                    b = a + sign * span * frac
+                    prims.append({"type": "curtain", "p0": wall.point(min(a, b), off).tolist(),
+                                  "p1": wall.point(max(a, b), off).tolist(), "z0": bottom,
+                                  "z1": rail, "amp": self._u((0.03, 0.06)),
+                                  "period": self._u((0.12, 0.2))})
+                self._add(layout, "curtains", "curtain", [], self._u((0.1, 0.7)), room.id, prims)
+
+    def _risers(self, layout: Layout, room: Room, g: RoomGrid) -> None:
+        """Стояки в углу санузла: трубы или зашитый короб до потолка."""
+        rng = self.rng
+        if room.kind != "bath" or rng.random() >= self.cfg.p_risers:
+            return
+        x0, y0, x1, y1 = room.clear
+        cx = x0 if rng.random() < 0.5 else x1
+        cy = y0 if rng.random() < 0.5 else y1
+        sx, sy = (1 if cx == x0 else -1), (1 if cy == y0 else -1)
+        H = room.ceiling_z
+        if rng.random() < 0.35:
+            a = self._u((0.25, 0.45))
+            box = Box((cx + sx * a / 2, cy + sy * a / 2, H / 2), (a, a, H), 0.0)
+            self._add(layout, "riser_box", "fixture", [box], self._u((0.5, 0.9)), room.id)
+            g.mark((min(cx, cx + sx * a), min(cy, cy + sy * a), max(cx, cx + sx * a),
+                    max(cy, cy + sy * a)), 0.05)
+            return
+        prims = []
+        for k in range(int(rng.integers(1, 3))):
+            r = self._u((0.025, 0.055))
+            px = cx + sx * (0.06 + r + k * 0.12)
+            py = cy + sy * (0.06 + r)
+            prims.append({"type": "cylinder", "center": [px, py, H / 2], "radius": r, "height": H})
+        self._add(layout, "riser", "fixture", [], self._u((0.3, 0.8)), room.id, prims)
+        g.mark((min(cx, cx + sx * 0.4), min(cy, cy + sy * 0.25), max(cx, cx + sx * 0.4),
+                max(cy, cy + sy * 0.25)), 0.0)
+
+    def _extras(self, layout: Layout, room: Room, g: RoomGrid) -> None:
+        """Растения, вешалки, светильники, телевизоры и картины на стенах."""
+        cfg, rng = self.cfg, self.rng
+        if not cfg.procedural:
+            return
+        if room.kind in ("room", "kitchen") and rng.random() < cfg.p_plants:
+            pts = g.free_points(0.4)
+            if len(pts):
+                x, y = pts[int(rng.integers(len(pts)))]
+                boxes, prims = fu.plant(float(x), float(y), rng)
+                self._add(layout, "plant", "furniture", boxes, self._u((0.1, 0.4)), room.id, prims)
+                g.mark((x - 0.3, y - 0.3, x + 0.3, y + 0.3), 0.0)
+        if room.kind == "corridor" and rng.random() < 0.4:
+            pts = g.free_points(0.35)
+            if len(pts):
+                x, y = pts[int(rng.integers(len(pts)))]
+                boxes, prims = fu.coat_rack(float(x), float(y), rng)
+                self._add(layout, "coat_rack", "furniture", boxes, self._refl(), room.id, prims)
+                g.mark((x - 0.3, y - 0.3, x + 0.3, y + 0.3), 0.0)
+        if cfg.lamps and room.kind != "balcony":
+            a, b, c, d = max(room.rects(), key=lambda r: (r[2] - r[0]) * (r[3] - r[1]))
+            x, y = (a + c) / 2, (b + d) / 2
+            if rng.random() < 0.5:
+                h = self._u((0.1, 0.2))
+                z = room.ceiling_z - self._u((0.3, 0.8))
+                prims = [{"type": "cylinder", "center": [x, y, z], "radius": self._u((0.12, 0.25)),
+                          "height": h},
+                         {"type": "cylinder", "center": [x, y, (z + h / 2 + room.ceiling_z) / 2],
+                          "radius": 0.006, "height": room.ceiling_z - z - h / 2}]
+            else:
+                prims = [{"type": "cylinder", "center": [x, y, room.ceiling_z - 0.04],
+                          "radius": self._u((0.15, 0.3)), "height": 0.08}]
+            self._add(layout, "lamp", "fixture", [], self._u((0.5, 0.9)), room.id, prims)
+        if room.kind == "room" and rng.random() < cfg.p_wall_decor:
+            side = ("B", "T", "L", "R")[int(rng.integers(4))]
+            lo, hi = _side_len(room.clear, side)
+            tv = rng.random() < 0.5
+            w = self._u((0.9, 1.4)) if tv else self._u((0.4, 1.0))
+            h = w * 0.58 if tv else self._u((0.3, 0.8))
+            depth = self._u((0.04, 0.08)) if tv else 0.02
+            if hi - lo > w + 0.4:
+                pos = self._u((lo + 0.2, hi - 0.2 - w))
+                z0 = self._u((1.0, 1.4)) if tv else self._u((1.2, 1.7))
+                rect, box = _box_on_side(room.clear, side, pos, w, depth, z0, h, gap=0.005)
+                if not g.occ[g._slices(rect)].any():
+                    self._add(layout, "tv" if tv else "picture", "furniture", [box],
+                              self._refl(), room.id)
 
     # --- плинтусы ----------------------------------------------------------
     def _door_gaps(self, layout: Layout, vertical: bool, coord: float) -> list:

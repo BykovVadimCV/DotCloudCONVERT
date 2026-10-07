@@ -26,12 +26,18 @@ SLAB_M = 0.2  # толщина перекрытий в сцене
 
 @dataclass
 class Solid:
-    """Параллелепипед с семантикой; общий вход и для сетки, и для эталонных масок."""
+    """Тело с семантикой; общий вход и для сетки, и для эталонных масок.
+
+    Обычно - параллелепипед box. Если задан mesh, геометрия берётся из него,
+    а box - только габарит (в эталон такие тела не попадают)."""
     box: Box
     label: str
     instance: int
     reflectance: float
-    source: str = ""          # wall:<id>, opening:<id>, item:<id>, slab:<room>
+    source: str = ""          # wall:<id>, opening:<id>:leaf, item:<id>:<вид>, slab:<k>
+    mesh: tuple | None = None # (vertices, triangles)
+    transmit: float = 0.0     # доля лучей насквозь (тюль); стекло задаётся отдельно
+    deform: bool = False      # архитектура: разбивается на сетку и получает неровность
 
 
 @dataclass
@@ -42,9 +48,35 @@ class SceneMesh:
     tri_instance: np.ndarray                  # (M,) int32
     tri_reflectance: np.ndarray               # (M,) float32
     instances: list[dict] = field(default_factory=list)
+    tri_transmit: np.ndarray | None = None    # (M,) float32
+    vert_deform: np.ndarray | None = None     # (N,) bool - вершины архитектуры
+
+    def __post_init__(self):
+        if self.tri_transmit is None:
+            self.tri_transmit = np.zeros(len(self.triangles), np.float32)
+        if self.vert_deform is None:
+            self.vert_deform = np.zeros(len(self.vertices), bool)
 
     @classmethod
-    def from_solids(cls, solids: list[Solid]) -> "SceneMesh":
+    def from_solids(cls, solids: list[Solid], tessellation: float | None = None) -> "SceneMesh":
+        """tessellation - шаг сетки для тел с deform=True (None - без разбиения)."""
+        plain = [s for s in solids if s.mesh is None and not (tessellation and s.deform)]
+        other = [s for s in solids if not (s.mesh is None and not (tessellation and s.deform))]
+        out = cls._from_boxes(plain)
+        for s in other:
+            v, t = s.mesh if s.mesh is not None else _box_mesh(s.box, tessellation)
+            n = len(t)
+            part = cls(np.asarray(v, np.float32), np.asarray(t, np.uint32),
+                       np.full(n, LABEL_ID[s.label], np.uint8), np.full(n, s.instance, np.int32),
+                       np.full(n, s.reflectance, np.float32),
+                       [{"instance": s.instance, "label": s.label, "source": s.source}],
+                       np.full(n, s.transmit, np.float32),
+                       np.full(len(v), bool(s.deform and s.mesh is None), bool))
+            out = out.concatenate(part)
+        return out
+
+    @classmethod
+    def _from_boxes(cls, solids: list[Solid]) -> "SceneMesh":
         if not solids:
             return cls(np.zeros((0, 3), np.float32), np.zeros((0, 3), np.uint32),
                        np.zeros(0, np.uint8), np.zeros(0, np.int32), np.zeros(0, np.float32))
@@ -65,6 +97,8 @@ class SceneMesh:
             rep(np.array([s.instance for s in solids], np.int32), 12),
             rep(np.array([s.reflectance for s in solids], np.float32), 12),
             [{"instance": s.instance, "label": s.label, "source": s.source} for s in solids],
+            rep(np.array([s.transmit for s in solids], np.float32), 12),
+            rep(np.array([s.deform for s in solids], bool), 8),
         )
 
     def concatenate(self, other: "SceneMesh") -> "SceneMesh":
@@ -75,6 +109,8 @@ class SceneMesh:
             np.concatenate([self.tri_instance, other.tri_instance]),
             np.concatenate([self.tri_reflectance, other.tri_reflectance]),
             self.instances + other.instances,
+            np.concatenate([self.tri_transmit, other.tri_transmit]),
+            np.concatenate([self.vert_deform, other.vert_deform]),
         )
 
     def to_raycasting_scene(self):
@@ -108,8 +144,15 @@ class SceneMesh:
             f.write(fbuf.tobytes())
 
 
+def _box_mesh(box, cell):
+    from .meshes import box_mesh
+
+    return box_mesh(box, cell)
+
+
 def _palette() -> np.ndarray:
     p = np.full((256, 3), 128, np.uint8)
+    p[13] = [170, 110, 200]
     p[:13] = [[0, 0, 0], [150, 120, 90], [220, 220, 220], [200, 60, 60], [160, 40, 40],
               [60, 160, 60], [60, 60, 200], [120, 200, 255], [255, 0, 255], [230, 160, 40],
               [255, 230, 80], [0, 200, 200], [90, 90, 90]]
@@ -129,9 +172,10 @@ class SceneBuilder:
         self._next_instance += 1
         return k
 
-    def _add(self, box: Box, label: str, refl: float, source: str, instance: int | None = None):
+    def _add(self, box: Box, label: str, refl: float, source: str, instance: int | None = None,
+             deform: bool = False):
         inst = self._new_instance() if instance is None else instance
-        self.solids.append(Solid(box, label, inst, float(refl), source))
+        self.solids.append(Solid(box, label, inst, float(refl), source, deform=deform))
         return inst
 
     def build(self) -> list[Solid]:
@@ -146,10 +190,22 @@ class SceneBuilder:
             elif o.kind == "window":
                 self._window(wall, o, mat)
         self._slabs(mat)
+        from .meshes import prim_mesh
+
         for it in lay.items:
             inst = self._new_instance()
+            src = f"item:{it.id}:{it.kind}"
             for b in it.boxes:
-                self._add(b, it.label, it.reflectance, f"item:{it.id}:{it.kind}", inst)
+                self._add(b, it.label, it.reflectance, src, inst, deform=it.label == "column")
+                self.solids[-1].transmit = it.transmit
+            for prim in it.prims:
+                v, t = prim_mesh(prim)
+                if len(t) == 0:
+                    continue
+                lo, hi = v.min(0), v.max(0)
+                bbox = Box(tuple((lo + hi) / 2), tuple(hi - lo), 0.0)
+                self.solids.append(Solid(bbox, it.label, inst, float(it.reflectance), src,
+                                         mesh=(v, t), transmit=it.transmit))
         return self.solids
 
     # --- стены -------------------------------------------------------------
@@ -178,7 +234,7 @@ class SceneBuilder:
         for sa, sb, za, zb in self.wall_pieces(wall):
             c = wall.point((sa + sb) / 2)
             box = Box((c[0], c[1], (za + zb) / 2), (sb - sa, wall.thickness, zb - za), wall.yaw)
-            self._add(box, "wall", refl, f"wall:{wall.id}", inst)
+            self._add(box, "wall", refl, f"wall:{wall.id}", inst, deform=True)
         if wall.kind == "exterior":
             # торцы перекрытий: закрывают щель между плитой и наружной стеной
             H = self.layout.ceiling_height
@@ -186,7 +242,7 @@ class SceneBuilder:
             c = wall.point((sa + sb) / 2)
             for za, zb in ((-SLAB_M, 0.0), (H, H + SLAB_M)):
                 box = Box((c[0], c[1], (za + zb) / 2), (sb - sa, wall.thickness, zb - za), wall.yaw)
-                self._add(box, "wall", refl, f"wall:{wall.id}", inst)
+                self._add(box, "wall", refl, f"wall:{wall.id}", inst, deform=True)
 
     def _door_leaf(self, wall: Wall, o: Opening, refl: float) -> None:
         lt = o.leaf_thickness
@@ -202,7 +258,7 @@ class SceneBuilder:
         c = hinge + d * leaf_w / 2
         yaw = math.atan2(d[1], d[0])
         box = Box((c[0], c[1], 0.005 + leaf_h / 2), (leaf_w, lt, leaf_h), yaw)
-        self._add(box, "door", refl, f"opening:{o.id}")
+        self._add(box, "door", refl, f"opening:{o.id}:leaf")
 
     def _window(self, wall: Wall, o: Opening, mat: dict) -> None:
         t = wall.thickness
@@ -249,9 +305,9 @@ class SceneBuilder:
         for k, (x0, y0, x1, y1) in enumerate(self.layout.slab_rects()):
             cx, cy, sx, sy = (x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0
             self._add(Box((cx, cy, -SLAB_M / 2), (sx, sy, SLAB_M)), "floor",
-                      mat.get("floor", 0.4), f"slab:{k}", floor_i)
+                      mat.get("floor", 0.4), f"slab:{k}", floor_i, deform=True)
             self._add(Box((cx, cy, H + SLAB_M / 2), (sx, sy, SLAB_M)), "ceiling",
-                      mat.get("ceiling", 0.8), f"slab:{k}", ceil_i)
+                      mat.get("ceiling", 0.8), f"slab:{k}", ceil_i, deform=True)
         for r in self.layout.rooms:
             if r.ceiling_z < H - 1e-6:
                 inst = self._new_instance()
@@ -260,9 +316,9 @@ class SceneBuilder:
                     self._add(box, "fixture", mat.get("ceiling", 0.8), f"suspended:{r.id}", inst)
 
 
-def build_scene(layout: Layout) -> tuple[SceneMesh, list[Solid]]:
+def build_scene(layout: Layout, tessellation: float | None = None) -> tuple[SceneMesh, list[Solid]]:
     solids = SceneBuilder(layout).build()
-    return SceneMesh.from_solids(solids), solids
+    return SceneMesh.from_solids(solids, tessellation), solids
 
 
 def surface_distance(points: np.ndarray, solids: list[Solid], chunk: int = 4096) -> np.ndarray:
@@ -272,6 +328,7 @@ def surface_distance(points: np.ndarray, solids: list[Solid], chunk: int = 4096)
     на длинных тонких треугольниках (плинтус 8 м x 7 см) ошибается до нескольких мм.
     """
     pts = np.asarray(points, float)
+    solids = [s for s in solids if s.mesh is None]
     c = np.array([s.box.center for s in solids])                 # (K, 3)
     h = np.array([s.box.size for s in solids]) / 2
     yaw = np.array([s.box.yaw for s in solids])

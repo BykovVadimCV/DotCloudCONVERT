@@ -90,9 +90,32 @@ class InteriorConfig:
     p_mirror_bath: float = 0.7
     p_mirror_other: float = 0.05
     clutter_per_m2: float = 0.05
+    procedural: bool = True             # мебель из частей (ножки, полки, спинки) вместо цельных коробок
+    p_curtains: float = 0.6             # шторы на окне жилой комнаты
+    p_tulle: float = 0.5                # тюль (пропускает часть лучей)
+    tulle_transmit: Range = (0.4, 0.8)
+    door_frames: bool = True            # коробки и наличники дверей
+    p_risers: float = 0.8               # стояки в санузле (трубы или короб)
+    p_plants: float = 0.3               # растение в комнате
+    p_wall_decor: float = 0.4           # телевизор / картина на стене
+    lamps: bool = True
+    asset_dir: str = ""                 # каталог внешних моделей: <вид>/*.obj|ply|glb|stl
+    p_asset: float = 0.5                # доля предметов, заменяемых внешней моделью
     exterior_ground: bool = True
     ground_drop_m: Range = (0.0, 20.0)  # этаж над землёй
     neighbour_buildings: tuple[int, int] = (0, 4)
+
+
+@dataclass
+class RealismConfig:
+    """Неидеальная геометрия здания. Диапазоны - на сцену."""
+    enabled: bool = True
+    tessellation_m: float = 0.3                  # шаг сетки на стенах и перекрытиях
+    wall_unevenness_mm: Range = (1.0, 4.0)       # СКО неровности поверхности
+    unevenness_corr_m: Range = (0.4, 1.2)        # длина корреляции неровности
+    lean_mm_per_m: Range = (0.0, 3.0)            # отклонение от вертикали
+    shear_deg_sigma: float = 0.25                # отклонение углов от 90 градусов (сдвиг плана)
+    thickness_jitter_mm: float = 5.0             # фактическая толщина против номинальной
 
 
 @dataclass
@@ -117,7 +140,7 @@ class EffectsConfig:
     range_noise: bool = True
     range_sigma_mm: Range = (0.5, 2.5)          # на сцену
     range_sigma_per_m_mm: Range = (0.0, 0.1)
-    mixed_pixels: bool = True
+    mixed_pixels: bool = False                  # эвристика; при beam_model не нужна
     mixed_jump_m: float = 0.05
     p_mixed: Range = (0.2, 0.6)
     grazing_dropout: bool = True
@@ -135,6 +158,14 @@ class EffectsConfig:
     people: bool = True
     people_per_station: tuple[int, int] = (0, 2)
     keep_invalid: bool = True                   # писать лучи без отклика (InvalidState = 1)
+    # Модель пятна луча: на кромках луч разбивается на подлучи по гауссову профилю,
+    # отклик - эхо с наибольшей энергией, дальность - средневзвешенная внутри эха.
+    beam_model: bool = True
+    beam_divergence_mrad: Range = (0.3, 0.6)    # НЕ ПРОВЕРЕНО для BLK360
+    beam_exit_mm: float = 3.0
+    echo_separation_m: float = 0.4              # ближе - одно (смешанное) эхо
+    edge_jump_m: float = 0.01                   # перепад, при котором пиксель считается кромкой
+    incidence_noise_power: float = 1.0          # sigma ~ sec(угла падения)^p (Soudarissanane 2011)
 
 
 @dataclass
@@ -150,12 +181,14 @@ class ExportConfig:
     unet_mask: bool = True                      # gt/unet_mask.png в формате datasetgen (ReFloorBRUSNIKA)
     unet_target_wall_px: float = 30.0           # наружная стена в px, как core/scale_norm.py
     preview: bool = True
+    debug: bool = False                         # debug/*.png: панорамы, кромки, неровность, шум
 
 
 @dataclass
 class SynthConfig:
     layout: LayoutConfig = field(default_factory=LayoutConfig)
     interior: InteriorConfig = field(default_factory=InteriorConfig)
+    realism: RealismConfig = field(default_factory=RealismConfig)
     scanner: ScannerConfig = field(default_factory=ScannerConfig)
     effects: EffectsConfig = field(default_factory=EffectsConfig)
     export: ExportConfig = field(default_factory=ExportConfig)

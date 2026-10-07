@@ -71,7 +71,17 @@ def main(argv: list[str] | None = None) -> None:
     pl.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     r = sub.add_parser("render", help="отрисовать layout.json сцены")
     r.add_argument("scene_dir")
+    dbg = sub.add_parser("debug", help="отладочные визуализации сцены в <сцена>/debug")
+    dbg.add_argument("scene_dir")
     args = ap.parse_args(argv)
+
+    if args.cmd == "debug":
+        import json
+
+        from .debug import debug_scene
+
+        print(json.dumps(debug_scene(args.scene_dir), ensure_ascii=False, indent=1)[:2000])
+        return
 
     if args.cmd == "plans":
         _plans(args)

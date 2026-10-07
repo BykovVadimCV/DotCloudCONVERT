@@ -160,12 +160,12 @@ def test_real_datasetgen_scene_points_on_surfaces(tmp_path):
     from simscan.scene import surface_distance
     from simscan.transform import WorldTransform
 
-    from conftest import CLEAN_EFFECTS
+    from conftest import CLEAN_EFFECTS, CLEAN_SCENE
 
     cfg = load_config(overrides={
         "layout": {"source": "datasetgen", "datasetgen_path": DG},
         "scanner": {"angular_step_deg": 0.5},
-        "effects": dict(CLEAN_EFFECTS), "export": {"preview": False}})
+        "effects": dict(CLEAN_EFFECTS), "export": {"preview": False}, **CLEAN_SCENE})
     generate_scene(cfg, tmp_path / "s", seed=3, index=1)
     doc = json.loads((tmp_path / "s" / "layout.json").read_text(encoding="utf-8"))
     lay = Layout.from_dict(doc)

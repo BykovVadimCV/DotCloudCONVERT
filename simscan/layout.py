@@ -127,6 +127,11 @@ class Item:
     boxes: list[Box]
     reflectance: float
     room_id: int | None = None
+    # Не-параллелепипеды: {"type": "cylinder", "center", "radius", "height"} |
+    # {"type": "curtain", "p0", "p1", "z0", "z1", "amp", "period"} |
+    # {"type": "mesh", "path", "center", "size", "yaw"} - внешняя модель, вписанная в габарит
+    prims: list = field(default_factory=list)
+    transmit: float = 0.0          # доля лучей, проходящих насквозь (тюль)
 
 
 @dataclass
@@ -197,7 +202,8 @@ class Layout:
         for it in d.get("items", []):
             boxes = [Box(tuple(b["center"]), tuple(b["size"]), b["yaw"]) for b in it["boxes"]]
             items.append(Item(it["id"], it["kind"], it["label"], boxes,
-                              it["reflectance"], it.get("room_id")))
+                              it["reflectance"], it.get("room_id"), it.get("prims", []),
+                              it.get("transmit", 0.0)))
         return cls(d["ceiling_height"], rooms, walls, openings, items,
                    d.get("materials", {}), d.get("meta", {}),
                    [tuple(x) for x in d.get("footprint", [])])

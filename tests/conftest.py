@@ -9,9 +9,17 @@ from simscan.config import load_config  # noqa: E402
 
 # всё «чистое»: без шума и помех, грубая сетка лучей
 CLEAN_EFFECTS = {
-    "range_noise": False, "mixed_pixels": False, "grazing_dropout": False,
+    "range_noise": False, "mixed_pixels": False, "beam_model": False, "grazing_dropout": False,
     "low_signal_dropout": False, "glass": False, "mirrors": False,
     "registration_error": False, "people": False,
+}
+
+
+# без неидеальной геометрии и без тел-сеток (точная проверка расстояний - только для коробок)
+CLEAN_SCENE = {
+    "realism": {"enabled": False},
+    "interior": {"p_curtains": 0.0, "p_tulle": 0.0, "p_risers": 0.0, "lamps": False,
+                 "p_plants": 0.0},
 }
 
 
@@ -27,6 +35,7 @@ def box_room_config(w=5.0, d=3.0, **extra):
         "scanner": {"angular_step_deg": 0.5, "p_room_unscanned": 0.0, "max_stations_per_room": 1},
         "effects": dict(CLEAN_EFFECTS),
         "export": {"preview": False},
+        "realism": {"enabled": False},
     }
     for k, v in extra.items():
         over.setdefault(k, {}).update(v)

@@ -56,6 +56,7 @@ class ScanResult:
     instance: np.ndarray       # (N,) int32
     virtual: np.ndarray        # (N,) bool - точка из отражения в зеркале
     mixed: np.ndarray          # (N,) bool - смешанный пиксель
+    diag: dict | None = None   # отладка: истинная дальность, угол падения, кромки, энергия
 
     @property
     def n_valid(self) -> int:
@@ -136,6 +137,7 @@ def sample_effect_params(ecfg: EffectsConfig, rng: np.random.Generator) -> dict:
         "range_sigma_m": u(ecfg.range_sigma_mm) / 1000 if ecfg.range_noise else 0.0,
         "range_sigma_per_m": u(ecfg.range_sigma_per_m_mm) / 1000 if ecfg.range_noise else 0.0,
         "p_mixed": u(ecfg.p_mixed) if ecfg.mixed_pixels else 0.0,
+        "beam_divergence_rad": u(ecfg.beam_divergence_mrad) / 1000 if ecfg.beam_model else 0.0,
         "p_glass_pass": u(ecfg.p_glass_pass) if ecfg.glass else 0.0,
         "registration_sigma_m": u(ecfg.registration_sigma_mm) / 1000 if ecfg.registration_error else 0.0,
         "registration_sigma_deg": u(ecfg.registration_sigma_deg) if ecfg.registration_error else 0.0,
@@ -149,6 +151,7 @@ class ScanSimulator:
         self.scfg, self.ecfg, self.params, self.rng = scfg, ecfg, params, rng
         self.dirs, self.rows, self.cols, self.nrow, self.ncol = ray_grid(scfg)
         self._static_scene = mesh.to_raycasting_scene()
+        self.keep_diag = False
 
     # ------------------------------------------------------------------
     def _cast(self, scene, origins: np.ndarray, dirs: np.ndarray):
@@ -200,20 +203,25 @@ class ScanSimulator:
         # --- стекло и зеркала в любом порядке вдоль луча ---------------------
         # t - полный путь луча; точка ставится на исходном направлении на дальности t
         # (так сканер и видит отражение: «виртуальная» точка за зеркалом).
-        if ecfg.glass or ecfg.mirrors:
+        transmissive = mesh.tri_transmit.any()
+        if ecfg.glass or ecfg.mirrors or transmissive:
             seg_o = np.broadcast_to(o, (n, 3)).copy()   # начало текущего отрезка луча
             seg_t = t.copy()                              # длина текущего отрезка
             settled = np.zeros(n, bool)                   # луч остался на стекле
             # стекло даёт два пересечения (две грани), на луче бывает несколько окон и зеркал
             for _ in range(8):
-                g = np.nonzero(hit & (label == GLASS) & ~settled)[0] if ecfg.glass else np.empty(0, int)
+                tr_hit = np.where(hit, mesh.tri_transmit[np.maximum(prim, 0)], 0.0)
+                cand = hit & ~settled & (((label == GLASS) & ecfg.glass) | (tr_hit > 0))
+                g = np.nonzero(cand)[0]
                 m = np.nonzero(hit & (label == MIRROR))[0] if ecfg.mirrors else np.empty(0, int)
                 if len(g):
                     via_special[g] = True
-                    through = rng.random(len(g)) < p["p_glass_pass"]
+                    p_pass = np.where(label[g] == GLASS, p["p_glass_pass"], tr_hit[g])
+                    through = rng.random(len(g)) < p_pass
                     stop = g[~through]
                     settled[stop] = True
-                    hit[stop[rng.random(len(stop)) >= ecfg.p_glass_return]] = False
+                    glass_stop = stop[label[stop] == GLASS]
+                    hit[glass_stop[rng.random(len(glass_stop)) >= ecfg.p_glass_return]] = False
                     g = g[through]
                 if len(g) == 0 and len(m) == 0:
                     break
@@ -234,7 +242,9 @@ class ScanSimulator:
                 hi = idx[hit2]
                 label[hi], inst[hi], refl[hi] = lookup(hi)
             # лимит итераций исчерпан - отклика нет
-            hit[hit & (((label == GLASS) & ~settled) | ((label == MIRROR) & ecfg.mirrors))] = False
+            tr_left = np.where(hit, mesh.tri_transmit[np.maximum(prim, 0)], 0.0) > 0
+            hit[hit & ~settled & (((label == GLASS) & ecfg.glass) | tr_left
+                                  | ((label == MIRROR) & ecfg.mirrors))] = False
             refl[virtual] *= 0.9
 
         # --- рабочий диапазон дальностей ------------------------------------
@@ -243,6 +253,21 @@ class ScanSimulator:
         nrm /= np.maximum(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12)
         cos_inc = np.abs(np.sum(dir_eff * nrm, axis=1))
         cos_inc[~hit] = 0.0
+        t_true = t.copy()
+
+        # --- пятно луча на кромках --------------------------------------------
+        frac = np.ones(n)                          # доля энергии пятна в принятом эхе
+        mixed = np.zeros(n, bool)
+        edge = np.zeros(n, bool)
+        if ecfg.beam_model and p.get("beam_divergence_rad", 0) > 0:
+            edge = self._edges(t, hit, inst) & ~via_special
+            e_idx = np.nonzero(edge)[0]
+            if len(e_idx):
+                res = self._beam(scene, mesh, o, d[e_idx], t[e_idx], p["beam_divergence_rad"])
+                t[e_idx], hit[e_idx] = res["t"], res["hit"]
+                label[e_idx], inst[e_idx], refl[e_idx] = res["label"], res["inst"], res["refl"]
+                cos_inc[e_idx], frac[e_idx], mixed[e_idx] = res["cos"], res["frac"], res["mixed"]
+                hit &= (t >= self.scfg.min_range_m) & (t <= self.scfg.max_range_m)
 
         # --- пропуски -------------------------------------------------------
         if ecfg.grazing_dropout:
@@ -251,21 +276,28 @@ class ScanSimulator:
             p_drop = np.clip((ang - ecfg.grazing_start_deg) / span, 0, 1) ** 2
             hit &= rng.random(n) >= p_drop
         if ecfg.low_signal_dropout:
-            snr = refl * np.maximum(cos_inc, 0.05) / np.maximum(t / 10.0, 0.1) ** 2
+            snr = frac * refl * np.maximum(cos_inc, 0.05) / np.maximum(t / 10.0, 0.1) ** 2
             p_drop = np.exp(-snr / ecfg.low_signal_snr0)
             hit &= rng.random(n) >= p_drop
 
-        # --- смешанные пиксели ----------------------------------------------
-        mixed = np.zeros(n, bool)
+        # --- смешанные пиксели (эвристика, если модель пятна выключена) -------
         if ecfg.mixed_pixels and p["p_mixed"] > 0:
             # у стекла «перепад» между соседями - случайность прохода, а не кромка
-            mixed = self._mixed_pixels(t, hit & ~via_special, p["p_mixed"])
+            mixed |= self._mixed_pixels(t, hit & ~via_special, p["p_mixed"])
 
         # --- шум дальности --------------------------------------------------
+        sig = np.zeros(n)
         if ecfg.range_noise and p["range_sigma_m"] > 0:
-            sig = (p["range_sigma_m"] + p["range_sigma_per_m"] * t) \
-                * np.sqrt(0.5 / np.maximum(refl, 0.05))
-            sig = np.minimum(sig, 4 * p["range_sigma_m"] + p["range_sigma_per_m"] * t)
+            base = p["range_sigma_m"] + p["range_sigma_per_m"] * t
+            # Soudarissanane 2011: шум растёт с углом падения (~ sec), слабый отклик шумит сильнее
+            sec = 1.0 / np.clip(cos_inc, 0.1, 1.0)
+            sig = base * sec ** ecfg.incidence_noise_power * np.sqrt(0.5 / np.maximum(refl, 0.05))
+            # пятно на наклонной поверхности растянуто: разброс дальностей внутри пятна
+            if p.get("beam_divergence_rad", 0) > 0:
+                diam = self.ecfg.beam_exit_mm / 1000 + p["beam_divergence_rad"] * t
+                tan = np.sqrt(np.clip(sec ** 2 - 1, 0, 130))
+                sig = np.sqrt(sig ** 2 + (diam * tan / math.sqrt(12)) ** 2)
+            sig = np.minimum(sig, 6 * base)
             noise = rng.normal(0.0, 1.0, n) * np.where(hit, sig, 0.0)
             t = np.where(hit, t + noise, t)
 
@@ -273,12 +305,119 @@ class ScanSimulator:
         tt = np.where(hit, t, 0.1)
         xyz = self.dirs * tt[:, None]
         intensity = np.where(
-            hit, refl * np.power(cos_inc, 0.7) * np.exp(-np.where(hit, t, 0) / 80.0)
+            hit, frac * refl * np.power(cos_inc, 0.7) * np.exp(-np.where(hit, t, 0) / 80.0)
             + rng.normal(0, 0.01, n), 0.0)
         label[~hit], inst[~hit] = 0, 0
+        diag = None
+        if self.keep_diag:
+            diag = {"t_true": t_true.astype(np.float32), "cos_inc": cos_inc.astype(np.float32),
+                    "edge": edge, "frac": frac.astype(np.float32), "sigma": sig.astype(np.float32)}
         return ScanResult(station.id, self.nrow, self.ncol, xyz, hit, self.rows, self.cols,
                           np.clip(intensity, 0, 1).astype(np.float32), label, inst,
-                          virtual & hit, mixed & hit)
+                          virtual & hit, mixed & hit, diag)
+
+    # --- модель пятна луча ---------------------------------------------------
+    def _edges(self, t, hit, inst) -> np.ndarray:
+        """Пиксели у перепада глубины, смены объекта или границы «есть отклик / нет»."""
+        T = np.where(hit, t, np.inf).reshape(self.nrow, self.ncol)
+        I = np.where(hit, inst, -1).reshape(self.nrow, self.ncol)
+        jump = self.ecfg.edge_jump_m
+        thr = jump + 0.002 * np.where(np.isfinite(T), T, 0)
+        e = np.zeros(T.shape, bool)
+        for sh in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            Tn = np.roll(T, sh, axis=(0, 1))
+            In = np.roll(I, sh, axis=(0, 1))
+            diff = (In != I) | (np.isfinite(T) != np.isfinite(Tn))
+            if sh[0] != 0:                           # по вертикали сетка не замкнута
+                diff[0 if sh[0] == 1 else -1] = False
+            e |= diff
+        # излом дальности (вторая разность): на гладкой наклонной плоскости она мала,
+        # на кромке - велика у обоих пикселей перепада
+        for axis in (1, 0):
+            Tp, Tm = np.roll(T, -1, axis), np.roll(T, 1, axis)
+            with np.errstate(invalid="ignore"):
+                d2 = np.abs(Tp - 2 * T + Tm)
+            bend = np.isfinite(d2) & (d2 > thr)
+            if axis == 0:
+                bend[0], bend[-1] = False, False
+            e |= bend
+        return e.reshape(-1)
+
+    _RING = [(0.0, 0.0, 1.0)] + \
+        [(0.5, a, math.exp(-0.5)) for a in np.linspace(0, 2 * math.pi, 6, endpoint=False)] + \
+        [(1.0, a + 0.2, math.exp(-2.0)) for a in np.linspace(0, 2 * math.pi, 8, endpoint=False)]
+
+    def _beam(self, scene, mesh, o, d, t0, divergence):
+        """Подлучи гауссова пятна; эхо с наибольшей энергией, дальность внутри эха - средняя
+        по энергии. Эхо ближе echo_separation_m сливаются (смешанный пиксель)."""
+        e = len(d)
+        k = len(self._RING)
+        beta = (self.ecfg.beam_exit_mm / 2000) / np.maximum(t0, 0.1) + divergence / 2
+        beta = np.where(np.isfinite(beta), beta, divergence / 2)
+        zaxis = np.array([0.0, 0.0, 1.0])
+        e1 = np.cross(d, zaxis)
+        bad = np.linalg.norm(e1, axis=1) < 1e-6
+        e1[bad] = np.cross(d[bad], np.array([1.0, 0.0, 0.0]))
+        e1 /= np.linalg.norm(e1, axis=1, keepdims=True)
+        e2 = np.cross(d, e1)
+        rho = np.array([r for r, _, _ in self._RING])
+        ang = np.array([a for _, a, _ in self._RING])
+        w = np.array([q for _, _, q in self._RING])
+        off = (rho[None, :, None] * beta[:, None, None]) * (
+            np.cos(ang)[None, :, None] * e1[:, None, :] + np.sin(ang)[None, :, None] * e2[:, None, :])
+        sub = d[:, None, :] + off
+        sub /= np.linalg.norm(sub, axis=2, keepdims=True)
+        ts, prim, nrm, hit = self._cast(scene, o, sub.reshape(-1, 3))
+        ts = np.where(hit, ts, np.inf).reshape(e, k)
+        prim = prim.reshape(e, k)
+        nrm = nrm.reshape(e, k, 3)
+        nrm /= np.maximum(np.linalg.norm(nrm, axis=2, keepdims=True), 1e-12)
+        cos = np.abs(np.sum(sub * nrm, axis=2))
+        pr = np.maximum(prim, 0)
+        refl = np.where(np.isfinite(ts), mesh.tri_reflectance[pr], 0.0)
+        energy = np.where(np.isfinite(ts), w * refl * np.maximum(cos, 0.02)
+                          / np.maximum(ts, 0.5) ** 2, 0.0)
+        # кластеры эха по дальности
+        order = np.argsort(ts, axis=1)
+        ts_s = np.take_along_axis(ts, order, 1)
+        en_s = np.take_along_axis(energy, order, 1)
+        with np.errstate(invalid="ignore"):
+            gap = np.diff(ts_s, axis=1)
+            new = np.concatenate([np.zeros((e, 1), bool), ~(gap < self.ecfg.echo_separation_m)], 1)
+        cid = np.cumsum(new, axis=1)
+        rows = np.repeat(np.arange(e), k)
+        acc = np.zeros((e, k))
+        np.add.at(acc, (rows, cid.ravel()), en_s.ravel())
+        acc_t = np.zeros((e, k))
+        np.add.at(acc_t, (rows, cid.ravel()), (en_s * np.where(np.isfinite(ts_s), ts_s, 0)).ravel())
+        best = np.argmax(acc, axis=1)
+        e_best = acc[np.arange(e), best]
+        t_mean = np.where(e_best > 0, acc_t[np.arange(e), best] / np.maximum(e_best, 1e-30), np.inf)
+        in_best = cid == best[:, None]
+        # представитель эха - подлуч с наибольшей энергией внутри него
+        rep_s = np.argmax(np.where(in_best, en_s, -1.0), axis=1)
+        rep = order[np.arange(e), rep_s]
+        lab = mesh.tri_label[pr[np.arange(e), rep]]
+        # смешанное эхо - в пятне разные поверхности (объекты или грани с разной нормалью);
+        # разброс дальностей по одной наклонной плоскости - это растяжение пятна, не смешение
+        n_rep = nrm[np.arange(e), rep]
+        nrm_s = np.take_along_axis(nrm, order[:, :, None], 1)
+        dots = np.abs(np.sum(nrm_s * n_rep[:, None, :], axis=2))
+        other_face = (in_best & np.isfinite(ts_s) & (dots < 0.98)).any(1)
+        ins = mesh.tri_instance[pr[np.arange(e), rep]]
+        inst_s = np.take_along_axis(np.where(np.isfinite(ts), mesh.tri_instance[pr], -1), order, 1)
+        n_inst = (np.where(in_best, inst_s, -1).max(1)
+                  != np.where(in_best, inst_s, 2 ** 30).min(1)).astype(int) + 1
+        t_in = np.where(in_best, ts_s, np.nan)
+        with np.errstate(all="ignore"):
+            spread = np.nanmax(t_in, 1) - np.nanmin(t_in, 1)
+        full = w.sum() * refl[np.arange(e), rep] * np.maximum(cos[np.arange(e), rep], 0.02) \
+            / np.maximum(ts[np.arange(e), rep], 0.5) ** 2
+        frac = np.clip(e_best / np.maximum(full, 1e-30), 0, 1)
+        return {"t": t_mean, "hit": e_best > 0, "label": lab, "inst": ins,
+                "refl": refl[np.arange(e), rep].astype(np.float32),
+                "cos": cos[np.arange(e), rep], "frac": frac,
+                "mixed": (e_best > 0) & ((n_inst > 1) | other_face) & (np.nan_to_num(spread) > 0.002)}
 
     def _mixed_pixels(self, t: np.ndarray, hit: np.ndarray, p_mixed: float) -> np.ndarray:
         """Смешанный пиксель: дальность между передним и задним планом у кромки."""

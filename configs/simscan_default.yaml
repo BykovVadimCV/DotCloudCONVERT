@@ -121,6 +121,19 @@ interior:
   p_mirror_bath: 0.7
   p_mirror_other: 0.05
   clutter_per_m2: 0.05
+  procedural: true
+  p_curtains: 0.6
+  p_tulle: 0.5
+  tulle_transmit:
+  - 0.4
+  - 0.8
+  door_frames: true
+  p_risers: 0.8
+  p_plants: 0.3
+  p_wall_decor: 0.4
+  lamps: true
+  asset_dir: ''
+  p_asset: 0.5
   exterior_ground: true
   ground_drop_m:
   - 0.0
@@ -128,6 +141,20 @@ interior:
   neighbour_buildings:
   - 0
   - 4
+realism:
+  enabled: true
+  tessellation_m: 0.3
+  wall_unevenness_mm:
+  - 1.0
+  - 4.0
+  unevenness_corr_m:
+  - 0.4
+  - 1.2
+  lean_mm_per_m:
+  - 0.0
+  - 3.0
+  shear_deg_sigma: 0.25
+  thickness_jitter_mm: 5.0
 scanner:
   angular_step_deg: 0.12
   elevation_min_deg: -60.0
@@ -151,7 +178,7 @@ effects:
   range_sigma_per_m_mm:
   - 0.0
   - 0.1
-  mixed_pixels: true
+  mixed_pixels: false
   mixed_jump_m: 0.05
   p_mixed:
   - 0.2
@@ -179,6 +206,14 @@ effects:
   - 0
   - 2
   keep_invalid: true
+  beam_model: true
+  beam_divergence_mrad:
+  - 0.3
+  - 0.6
+  beam_exit_mm: 3.0
+  echo_separation_m: 0.4
+  edge_jump_m: 0.01
+  incidence_noise_power: 1.0
 export:
   pixel_mm: 10.0
   pad_m: 0.5
@@ -195,3 +230,4 @@ export:
   unet_mask: true
   unet_target_wall_px: 30.0
   preview: true
+  debug: false

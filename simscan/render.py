@@ -87,12 +87,24 @@ def render_plan(layout: Layout, out_png: str | Path, px_per_m: float = 60.0,
     # мебель - тонким контуром
     if furniture:
         for it in layout.items:
-            if it.label not in ("furniture", "clutter") and it.kind not in ("radiator",):
+            if it.label not in ("furniture", "clutter", "fixture", "curtain") or \
+                    it.kind in ("baseboard", "lamp", "soffit"):
                 continue
-            for b in it.boxes:
+            for b in sorted(it.boxes, key=lambda b: b.center[2]):
                 if b.center[2] - b.size[2] / 2 > 1.4:           # навесное - не рисуем
                     continue
                 cv.poly(_box_pts(b), fill=(255, 255, 255), outline=(150, 150, 150), width=1)
+            for pr in it.prims:
+                if pr["type"] == "cylinder" and pr["center"][2] - pr["height"] / 2 < 1.4:
+                    x, y = cv.p(pr["center"][0], pr["center"][1])
+                    r = pr["radius"] * cv.k
+                    cv.d.ellipse([x - r, y - r, x + r, y + r], fill=(255, 255, 255),
+                                 outline=(120, 120, 120), width=cv.ss)
+                elif pr["type"] == "curtain":
+                    _curtain(cv, pr, (150, 90, 190) if it.kind == "curtains" else (190, 160, 215))
+                elif pr["type"] == "mesh":
+                    b = Box(tuple(pr["center"]), tuple(pr["size"]), pr.get("yaw", 0.0))
+                    cv.poly(_box_pts(b), fill=(235, 240, 250), outline=(90, 110, 160), width=1)
     for it in layout.items:
         if it.label == "column":
             for b in it.boxes:
@@ -189,6 +201,18 @@ def _title(layout: Layout, total: float) -> str:
         parts = [m.get("source", "simscan")]
     parts.append(f"общая {total:.1f}".replace(".", ",") + " м²")
     return ", ".join(p for p in parts if p)
+
+
+def _curtain(cv: _Canvas, pr: dict, color) -> None:
+    p0, p1 = np.asarray(pr["p0"], float), np.asarray(pr["p1"], float)
+    L = float(np.linalg.norm(p1 - p0))
+    if L < 1e-6:
+        return
+    u = (p1 - p0) / L
+    n = np.array([-u[1], u[0]])
+    s = np.linspace(0, L, max(8, int(L / (pr["period"] / 6))))
+    pts = p0[None] + s[:, None] * u + (pr["amp"] * np.sin(2 * math.pi * s / pr["period"]))[:, None] * n
+    cv.d.line([cv.p(*q) for q in pts], fill=color, width=max(1, int(1.5 * cv.ss)))
 
 
 def _door(cv: _Canvas, wall: Wall, o: Opening) -> None:

@@ -11,7 +11,7 @@ from simscan.layout import Layout
 from simscan.scene import build_scene, surface_distance
 from simscan.transform import WorldTransform, quat_from_matrix, rot_x, rot_y, rot_z
 
-from conftest import CLEAN_EFFECTS
+from conftest import CLEAN_EFFECTS, CLEAN_SCENE
 
 
 def test_quaternion_matches_pyquaternion():
@@ -27,6 +27,7 @@ def _clean_scene(tmp_path, **effects):
         "scanner": {"angular_step_deg": 0.5},
         "effects": {**CLEAN_EFFECTS, **effects},
         "export": {"preview": False, "world_offset_m": [100000.0, 100000.0]},
+        **CLEAN_SCENE,
     })
     info = generate_scene(cfg, tmp_path / "s", seed=7, index=0)
     doc = json.loads((tmp_path / "s" / "layout.json").read_text(encoding="utf-8"))

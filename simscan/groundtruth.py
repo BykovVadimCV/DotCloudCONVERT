@@ -50,9 +50,26 @@ class RasterFrame:
         return x, y
 
 
+def layout_warp(layout: Layout):
+    """Сдвиг плана из realism (матрица 2x2) или None, если его нет."""
+    A = layout.meta.get("warp")
+    if A is None or np.allclose(A, np.eye(2)):
+        return None
+    return np.asarray(A, float)
+
+
+def warped_bbox(layout: Layout):
+    x0, y0, x1, y1 = layout.bbox()
+    A = layout_warp(layout)
+    if A is None:
+        return x0, y0, x1, y1
+    c = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]) @ A.T
+    return (*c.min(0), *c.max(0))
+
+
 def frame_for(layout: Layout, pixel_mm: float, pad_m: float) -> RasterFrame:
     p = pixel_mm / 1000.0
-    x0, y0, x1, y1 = layout.bbox()
+    x0, y0, x1, y1 = warped_bbox(layout)
     ox = math.floor((x0 - pad_m) / p) * p
     oy = math.floor((y0 - pad_m) / p) * p
     w = int(math.ceil((x1 + pad_m - ox) / p))
@@ -76,8 +93,39 @@ def raster_rect(frame: RasterFrame, mask: np.ndarray, rect, value=True) -> None:
         mask[frame.height - k1:frame.height - k0, j0:j1] = value
 
 
-def raster_box(frame: RasterFrame, mask: np.ndarray, box: Box, value=True) -> None:
-    """След параллелепипеда на плане; осевые - точно, повёрнутые - по центрам пикселей."""
+def raster_quad(frame: RasterFrame, mask: np.ndarray, pts, value=True) -> None:
+    """Выпуклый четырёхугольник (по центрам пикселей)."""
+    pts = np.asarray(pts, float)
+    j0, j1 = _span(pts[:, 0].min(), pts[:, 0].max() + frame.pixel_m, frame.origin_x,
+                   frame.pixel_m, frame.width)
+    k0, k1 = _span(pts[:, 1].min(), pts[:, 1].max() + frame.pixel_m, frame.origin_y,
+                   frame.pixel_m, frame.height)
+    if j1 <= j0 or k1 <= k0:
+        return
+    jj, kk = np.meshgrid(np.arange(j0, j1), np.arange(k0, k1))
+    x = frame.origin_x + (jj + 0.5) * frame.pixel_m
+    y = frame.origin_y + (kk + 0.5) * frame.pixel_m
+    cross = []
+    for a, b in zip(pts, np.roll(pts, -1, 0)):
+        cross.append((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]))
+    cross = np.stack(cross)
+    inside = (cross >= 0).all(0) | (cross <= 0).all(0)
+    mask[frame.height - 1 - kk[inside], jj[inside]] = value
+
+
+def _box_corners(box: Box):
+    c, s = math.cos(box.yaw), math.sin(box.yaw)
+    hx, hy = box.size[0] / 2, box.size[1] / 2
+    return np.array([(box.center[0] + u * c - v * s, box.center[1] + u * s + v * c)
+                     for u, v in ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy))])
+
+
+def raster_box(frame: RasterFrame, mask: np.ndarray, box: Box, value=True, warp=None) -> None:
+    """След параллелепипеда на плане; осевые - точно, повёрнутые - по центрам пикселей.
+    warp - сдвиг плана (2x2): след становится параллелограммом."""
+    if warp is not None:
+        raster_quad(frame, mask, _box_corners(box) @ warp.T, value)
+        return
     cx, cy, _ = box.center
     sx, sy, _ = box.size
     yaw = box.yaw % (math.pi / 2)
@@ -110,6 +158,7 @@ def opening_box(layout: Layout, o) -> Box:
 def build_masks(layout: Layout, solids: list[Solid], frame: RasterFrame,
                 cut_z: float) -> dict[str, np.ndarray]:
     shape = (frame.height, frame.width)
+    A = layout_warp(layout)
     walls = np.zeros(shape, bool)
     # ограждения балконов ниже секущей плоскости, но на планах рисуются стеной
     parapets = {f"wall:{w.id}" for w in layout.walls if w.kind == "parapet"}
@@ -118,17 +167,22 @@ def build_masks(layout: Layout, solids: list[Solid], frame: RasterFrame,
             continue
         z0, z1 = s.box.center[2] - s.box.size[2] / 2, s.box.center[2] + s.box.size[2] / 2
         if z0 <= cut_z < z1 or (s.source in parapets and z0 <= 0.0):
-            raster_box(frame, walls, s.box)
+            raster_box(frame, walls, s.box, warp=A)
     doors = np.zeros(shape, bool)
     windows = np.zeros(shape, bool)
     for o in layout.openings:
-        raster_box(frame, windows if o.kind == "window" else doors, opening_box(layout, o))
+        raster_box(frame, windows if o.kind == "window" else doors, opening_box(layout, o), warp=A)
     doors &= ~walls
     windows &= ~walls
     rooms = np.zeros(shape, np.uint16)
     for r in layout.rooms:
         for rect in (r.region or [r.cell]):
-            raster_rect(frame, rooms, rect, r.id + 1)
+            if A is None:
+                raster_rect(frame, rooms, rect, r.id + 1)
+            else:
+                x0, y0, x1, y1 = rect
+                raster_quad(frame, rooms, np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]]) @ A.T,
+                            r.id + 1)
     rooms[walls | doors | windows] = 0
     classes = np.zeros(shape, np.uint8)
     classes[walls], classes[doors], classes[windows] = 1, 2, 3
@@ -139,18 +193,21 @@ def describe(layout: Layout, masks: dict, frame: RasterFrame, world: WorldTransf
              cut_z: float) -> dict:
     """gt.json: привязка растра, размеры в мм и площади для отчёта о точности."""
     px2 = frame.pixel_m ** 2
+    A = layout_warp(layout)
+    Wp = (lambda p: np.asarray(p, float)) if A is None else (lambda p: np.asarray(p, float) @ A.T)
     walls = []
     for w in layout.walls:
         faces = []
         for side in (-1, 1):
             off = side * w.thickness / 2
-            faces.append([w.point(-w.ext0, off).round(4).tolist(),
-                          w.point(w.length + w.ext1, off).round(4).tolist()])
+            faces.append([Wp(w.point(-w.ext0, off)).round(4).tolist(),
+                          Wp(w.point(w.length + w.ext1, off)).round(4).tolist()])
         walls.append({"id": w.id, "kind": w.kind, "thickness_mm": round(w.thickness * 1000, 1),
-                      "axis": [list(w.p0), list(w.p1)], "faces": faces})
+                      "axis": [Wp(w.p0).round(4).tolist(), Wp(w.p1).round(4).tolist()],
+                      "faces": faces})
     openings = []
     for o in layout.openings:
-        c = layout.wall(o.wall_id).point(o.s)
+        c = Wp(layout.wall(o.wall_id).point(o.s))
         openings.append({"id": o.id, "kind": o.kind, "wall_id": o.wall_id,
                          "width_mm": round(o.width * 1000, 1),
                          "z0_m": o.z0, "z1_m": o.z1, "rooms": list(o.rooms),
@@ -168,6 +225,7 @@ def describe(layout: Layout, masks: dict, frame: RasterFrame, world: WorldTransf
         "pixel_formula": "x = origin_x + (j + 0.5) * px; y = origin_y + (H - 1 - i + 0.5) * px "
                          "(СК планировки, затем layout_to_world)",
         "cut_height_m": cut_z,
+        "warp": None if A is None else A.tolist(),
         "classes": CLASSES,
         "layout_to_world": world.to_dict(),
         "ceiling_height_m": layout.ceiling_height,
@@ -185,7 +243,7 @@ def unet_frame(layout: Layout, target_wall_px: float, pad_m: float) -> RasterFra
     """Квадратный кадр, в котором наружная стена занимает target_wall_px пикселей
     (так ReFloorBRUSNIKA нормирует масштаб перед U-Net, core/scale_norm.py)."""
     p = layout.meta["t_ext"] / target_wall_px
-    x0, y0, x1, y1 = layout.bbox()
+    x0, y0, x1, y1 = warped_bbox(layout)
     side = max(x1 - x0, y1 - y0) + 2 * pad_m
     n = int(math.ceil(side / p))
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
@@ -201,9 +259,10 @@ def unet_mask(layout: Layout, solids: list[Solid], frame: RasterFrame, cut_z: fl
     out[m["windows"]] = UNET_VALUES["window"]
     out[m["doors"]] = UNET_VALUES["door"]
     leaves = np.zeros_like(m["walls"])
+    A = layout_warp(layout)
     for s in solids:
-        if s.label == "door":
-            raster_box(frame, leaves, s.box)
+        if s.label == "door" and s.source.endswith(":leaf"):
+            raster_box(frame, leaves, s.box, warp=A)
     out[leaves & (out == 0)] = UNET_VALUES["door"]
     return out
 
