@@ -3,6 +3,7 @@ import dataclasses
 import io
 import json
 import tarfile
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -160,3 +161,28 @@ def test_free_space_input_matches_box_room(tmp_path):
     assert stats["stations"][0]["bins_empty"] == 0
     assert stats["wall_iou_scanned"] >= stats["wall_iou"] - 1e-9
     assert (tmp_path / "s" / "input" / "valid.png").exists()
+
+
+def test_inspect_e57_recovers_scene_facts(tmp_path):
+    """Анализатор реального E57 на синтетике: шаг, сетка, высота станции, потолок, архив."""
+    from simscan.generate import generate_scene
+    from simscan.inspect_e57 import inspect_e57
+
+    cfg = box_room_config(5.0, 3.0, export={"free_space_input": False}, layout={"source": "simscan"},
+                          scanner={"angular_step_deg": 0.5, "min_range_m": 0.1})
+    generate_scene(cfg, tmp_path / "s", seed=0, index=0)
+    doc = json.loads((tmp_path / "s" / "layout.json").read_text())
+    rep = inspect_e57(tmp_path / "s" / "scan.e57", tmp_path / "rep", chunk=50_000, log=lambda *a: None)
+    st, true = rep["scans"][0], doc["stations"][0]
+    assert abs(st["azimuth_step_deg"] - 0.5) < 0.01 and abs(st["elevation_step_deg"] - 0.5) < 0.01
+    assert st["grid_rows_cols"] == [doc["meta"]["scanner"]["nrow"], doc["meta"]["scanner"]["ncol"]]
+    assert abs(-st["floor_rel_m"] - true["position_layout_m"][2]) < 0.02
+    assert abs(st["ceiling_rel_m"] - st["floor_rel_m"] - doc["ceiling_height"]) < 0.02
+    assert rep["file"]["points_total"] == sum(s["rays"] for s in doc["stations"])
+    assert abs(rep["plan"]["free_area_m2"] - 15.0) < 1.5
+    for name in ("report.json", "summary.txt", "header_tree.json", "plan.png", "sensor.png",
+                 "sample.npz", "input.png"):
+        assert (tmp_path / "rep" / name).exists(), name
+    assert Path(rep["zip"]).exists()
+    s = np.load(tmp_path / "rep" / "sample.npz")
+    assert len(s["xyz"]) > 1000 and set(np.unique(s["station"])) <= set(range(len(doc["stations"])))

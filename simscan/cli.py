@@ -3,6 +3,7 @@
     python -m simscan generate --out D:/synth --count 200 --seed 0 [--config cfg.yaml] [--workers 2]
     python -m simscan generate --out D:/synth --count 1 --set scanner.angular_step_deg=0.3
     python -m simscan dump-config > cfg.yaml
+    python -m simscan inspect-e57 D:/scans/kvartira.e57    # отчёт по реальному E57 -> _report.zip
     python -m simscan assets --source gso --out D:/scans --per-role 40
     python -m simscan pair D:/synth/scene_00000 D:/synth/scene_00001 --out pairs.png
 """
@@ -82,6 +83,11 @@ def main(argv: list[str] | None = None) -> None:
     a.add_argument("--per-role", type=int, default=20)
     a.add_argument("--max-triangles", type=int, default=3000)
     a.add_argument("--seed", type=int, default=0)
+    ie = sub.add_parser("inspect-e57", help="отчёт по реальному E57 для калибровки (маленький zip)")
+    ie.add_argument("e57")
+    ie.add_argument("--out", help="каталог отчёта (по умолчанию <файл>_report рядом с файлом)")
+    ie.add_argument("--no-sample", action="store_true", help="без прореженного облака sample.npz")
+    ie.add_argument("--chunk", type=int, default=2_000_000, help="точек за одно чтение")
     pr = sub.add_parser("pair", help="обучающая пара сцены: растр свободного пространства + эталон")
     pr.add_argument("scene_dirs", nargs="+")
     pr.add_argument("--out", help="общая картинка (по умолчанию <сцена>/input/pair.png)")
@@ -95,6 +101,17 @@ def main(argv: list[str] | None = None) -> None:
         kw = {"per_role": args.per_role, "seed": args.seed} if args.source == "gso" \
             else {"max_per_kind": args.per_role}
         print(fn(args.out, max_triangles=args.max_triangles, **kw))
+        return
+    if args.cmd == "inspect-e57":
+        from pathlib import Path
+
+        from .inspect_e57 import inspect_e57
+
+        src = Path(args.e57)
+        out = Path(args.out) if args.out else src.with_name(src.stem + "_report")
+        rep = inspect_e57(src, out, chunk=args.chunk, sample=not args.no_sample)
+        print((out / "summary.txt").read_text(encoding="utf-8"))
+        print("отправить:", rep.get("zip"))
         return
     if args.cmd == "pair":
         import json
