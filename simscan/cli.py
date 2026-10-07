@@ -4,7 +4,7 @@
     python -m simscan generate --out D:/synth --count 1 --set scanner.angular_step_deg=0.3
     python -m simscan dump-config > cfg.yaml
     python -m simscan assets --source gso --out D:/scans --per-role 40
-    python -m simscan pair D:/synth/scene_00000          # вход сети и эталон рядом
+    python -m simscan pair D:/synth/scene_00000 D:/synth/scene_00001 --out pairs.png
 """
 from __future__ import annotations
 
@@ -83,7 +83,8 @@ def main(argv: list[str] | None = None) -> None:
     a.add_argument("--max-triangles", type=int, default=3000)
     a.add_argument("--seed", type=int, default=0)
     pr = sub.add_parser("pair", help="обучающая пара сцены: растр свободного пространства + эталон")
-    pr.add_argument("scene_dir")
+    pr.add_argument("scene_dirs", nargs="+")
+    pr.add_argument("--out", help="общая картинка (по умолчанию <сцена>/input/pair.png)")
     args = ap.parse_args(argv)
 
     if args.cmd == "assets":
@@ -97,10 +98,16 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.cmd == "pair":
         import json
+        from pathlib import Path
 
-        from .rasterize import make_pair
+        from .rasterize import pair_data, pair_sheet
 
-        print(json.dumps(make_pair(args.scene_dir), ensure_ascii=False, indent=1))
+        items = [pair_data(d) for d in args.scene_dirs]
+        out = Path(args.out) if args.out else Path(args.scene_dirs[0]) / "input" / "pair.png"
+        pair_sheet(items, out)
+        print(json.dumps({d["name"]: {k: v for k, v in d["stats"].items() if k.startswith("wall")}
+                          for d in items}, ensure_ascii=False, indent=1))
+        print(out)
         return
 
     if args.cmd == "debug":

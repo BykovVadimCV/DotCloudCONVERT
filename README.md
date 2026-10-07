@@ -23,7 +23,7 @@ python -m simscan generate --out D:/synth --count 1 --set scanner.angular_step_d
 python -m simscan dump-config > my.yaml           # все параметры; правка и --config my.yaml
 python -m simscan assets --source gso --out D:/scans --per-role 40   # реальные сканы предметов
 python -m simscan generate --out D:/synth --count 200 --set interior.scan_dir=D:/scans
-python -m simscan pair D:/synth/scene_00000       # картинка обучающей пары: вход | эталон | сравнение
+python -m simscan pair D:/synth/scene_00000 D:/synth/scene_00001 --out pairs.png   # сетка пар
 ```
 
 Одна сцена (4–8 станций по 3,75 млн лучей при шаге 0,12°) — 20–60 с и 100–250 МБ E57.
@@ -110,7 +110,7 @@ input/free_space.png   вход: белое - свободно, чёрное - �
                        светло-серое 215 - не отсканировано (3 одинаковых канала, как RGB чертежа)
 input/valid.png        где скан что-то видел; вне её эталон есть, а данных нет - маска потерь
 input/input.json       IoU / точность / полнота стен входа против эталона (базовая линия без сети)
-input/pair.png         (export.debug или `simscan pair`) срез облака | вход | эталон | сравнение
+input/pair.png         (export.debug или `simscan pair`) облако | вход | эталон | разница стен
 ```
 
 Входная картинка без сети совпадает с эталоном по стенам на IoU 0,4-0,5: наружные стены

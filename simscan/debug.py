@@ -50,9 +50,10 @@ def _plt():
     plt.rcParams.update({
         "figure.facecolor": SURFACE, "axes.facecolor": SURFACE, "savefig.facecolor": SURFACE,
         "axes.edgecolor": GRID, "axes.labelcolor": INK2, "xtick.color": INK2, "ytick.color": INK2,
-        "text.color": INK, "axes.titlecolor": INK, "axes.grid": True, "grid.color": GRID,
+        "text.color": INK, "axes.grid": True, "grid.color": GRID,
         "grid.linewidth": 0.8, "axes.spines.top": False, "axes.spines.right": False,
-        "font.size": 10, "axes.titlesize": 11, "axes.titleweight": "bold", "legend.frameon": False,
+        "font.size": 10, "axes.titlesize": 11, "axes.titleweight": "normal", "axes.titlelocation": "left",
+        "axes.titlecolor": INK2, "legend.frameon": False, "legend.fontsize": 9,
     })
     return plt
 
@@ -139,12 +140,12 @@ def panorama(scan, out: Path) -> dict:
     fig, axes = plt.subplots(4, 1, figsize=(15, 13), constrained_layout=True)
     ax = axes[0]
     im = ax.imshow(t, cmap="Blues_r", aspect="auto", interpolation="nearest")
-    ax.set_title("Дальность, м (светлее - дальше; белое - нет отклика)")
+    ax.set_title("Дальность, м")
     fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01)
     ax = axes[1]
     cmap = ListedColormap([SURFACE] + [c for _, c, _ in GROUPS])
     ax.imshow(grp, cmap=cmap, vmin=-0.5, vmax=len(GROUPS) + 0.5, aspect="auto", interpolation="nearest")
-    ax.set_title("Классы точек")
+    ax.set_title("Классы")
     ax.legend(handles=[plt.Rectangle((0, 0), 1, 1, color=c) for _, c, _ in GROUPS],
               labels=[n for n, _, _ in GROUPS], loc="upper left", bbox_to_anchor=(1.0, 1.0), fontsize=9)
     ax = axes[2]
@@ -152,16 +153,15 @@ def panorama(scan, out: Path) -> dict:
     ax.imshow(base, cmap="gray", vmin=0, vmax=1, aspect="auto", interpolation="nearest")
     cmap2 = ListedColormap([(0, 0, 0, 0), AQUA, ORANGE, RED])
     ax.imshow(over, cmap=cmap2, vmin=-0.5, vmax=3.5, aspect="auto", interpolation="nearest")
-    ax.set_title("Модель пятна: кромки (подлучи), смешанные эхо, пропуски сигнала")
+    ax.set_title("Кромки, смешанные эхо, пропуски")
     ax.legend(handles=[plt.Rectangle((0, 0), 1, 1, color=c) for c in (AQUA, ORANGE, RED)],
-              labels=["кромка: считались подлучи", "смешанное эхо (дальность между поверхностями)",
-                      "пропуск (слабый сигнал, скользящий луч)"],
+              labels=["кромка", "смешанное эхо", "пропуск"],
               loc="upper left", bbox_to_anchor=(1.0, 1.0), fontsize=9)
     ax = axes[3]
     im = ax.imshow(np.where(scan.valid, scan.intensity, np.nan).reshape(R, C), cmap="gray",
                    aspect="auto", interpolation="nearest", vmin=0, vmax=np.nanpercentile(
                        np.where(scan.valid, scan.intensity, np.nan), 99))
-    ax.set_title("Интенсивность (с учётом угла падения, дальности и доли пятна)")
+    ax.set_title("Интенсивность")
     fig.colorbar(im, ax=ax, fraction=0.02, pad=0.01)
     for ax in axes:
         ax.grid(False)
@@ -169,7 +169,6 @@ def panorama(scan, out: Path) -> dict:
         ax.set_xticklabels([f"{a:.0f}°" for a in np.linspace(0, 360, 9)])
         ax.set_yticks([0, R - 1])
         ax.set_yticklabels(["верх", "низ"])
-    fig.suptitle("Панорама станции 0 (строки - угол места, столбцы - азимут)", fontweight="bold")
     fig.savefig(out, dpi=90)
     plt.close(fig)
     valid = scan.valid
@@ -197,8 +196,7 @@ def edge_closeup(lay, station, scan_off, scan_on, out: Path, solids=None) -> dic
     best = (float(np.linalg.norm(c - pos)), c)
     fig, axes = plt.subplots(1, 2, figsize=(13, 6.4), constrained_layout=True, sharex=True, sharey=True)
     stats = {}
-    for ax, (name, sc) in zip(axes, (("Центральный луч (без модели пятна)", scan_off),
-                                     ("Модель пятна луча", scan_on))):
+    for ax, (name, sc) in zip(axes, (("Центральный луч", scan_off), ("Модель пятна", scan_on))):
         p = _to_layout(sc, station)
         sel = sc.valid & (p[:, 2] > 0.3) & (p[:, 2] < 2.0) & (np.abs(p[:, 0] - c[0]) < r) & \
             (np.abs(p[:, 1] - c[1]) < r)
@@ -209,9 +207,9 @@ def edge_closeup(lay, station, scan_off, scan_on, out: Path, solids=None) -> dic
                 q = W(_box_corners(sol.box))
                 ax.fill(q[:, 0], q[:, 1], color="#ecebe6", zorder=0, lw=0)
         m = sc.mixed[sel]
-        ax.scatter(p[sel][~m, 0], p[sel][~m, 1], s=1, color=BLUE, alpha=0.5, label="обычные точки",
+        ax.scatter(p[sel][~m, 0], p[sel][~m, 1], s=1, color=BLUE, alpha=0.5, label="точки",
                    zorder=2)
-        ax.scatter(p[sel][m, 0], p[sel][m, 1], s=5, color=ORANGE, label="смешанные эхо", zorder=3)
+        ax.scatter(p[sel][m, 0], p[sel][m, 1], s=5, color=ORANGE, label="смешанное эхо", zorder=3)
         ax.set_title(name)
         ax.set_aspect("equal")
         ax.set_xlim(c[0] - r, c[0] + r)
@@ -220,8 +218,6 @@ def edge_closeup(lay, station, scan_off, scan_on, out: Path, solids=None) -> dic
         stats[name] = {"points": int(sel.sum()), "mixed": int(m.sum())}
     axes[0].set_ylabel("y, м")
     axes[1].legend(loc="upper right", markerscale=2)
-    fig.suptitle(f"Вид сверху, z 0,3–2,0 м: место с наибольшим числом смешанных эхо "
-                 f"({best[0]:.1f} м от станции); серым - стены на высоте 1,25 м", fontweight="bold")
     fig.savefig(out, dpi=100)
     plt.close(fig)
     return stats
@@ -262,23 +258,21 @@ def wall_flatness(scan, station, solids, out: Path) -> dict:
     lim = float(np.percentile(np.abs(res_meas), 99))
     fig = plt.figure(figsize=(14, 8.5), constrained_layout=True)
     gs = fig.add_gridspec(2, 3, width_ratios=[1, 1, 0.55])
-    for k, (name, res) in enumerate((("Истинная поверхность (неровность, завал)", res_true),
-                                     ("Измерение (неровность + шум)", res_meas))):
+    for k, (name, res) in enumerate((("Поверхность", res_true), ("Измерение", res_meas))):
         ax = fig.add_subplot(gs[k, :2])
         sc = ax.scatter(s, z, c=res, s=2, cmap=_diverging(), vmin=-lim, vmax=lim)
         ax.set_title(name)
         ax.set_xlabel("вдоль стены, м")
         ax.set_ylabel("высота, м")
-        fig.colorbar(sc, ax=ax, fraction=0.03, pad=0.01, label="отклонение от плоскости, мм")
+        fig.colorbar(sc, ax=ax, fraction=0.03, pad=0.01, label="мм")
     ax = fig.add_subplot(gs[:, 2])
     bins = np.linspace(-lim, lim, 50)
     ax.hist(res_meas, bins=bins, color=BLUE, alpha=0.9, label="измерение")
-    ax.hist(res_true, bins=bins, histtype="step", color=ORANGE, lw=2, label="истинная поверхность")
+    ax.hist(res_true, bins=bins, histtype="step", color=ORANGE, lw=2, label="поверхность")
     ax.set_xlabel("отклонение, мм")
     ax.set_ylabel("точек")
     ax.legend(loc="upper right")
     ax.set_title("Распределение")
-    fig.suptitle("Одна стена со станции 0 относительно наилучшей плоскости", fontweight="bold")
     fig.savefig(out, dpi=100)
     plt.close(fig)
     return {"wall_points": int(keep.sum()), "surface_rms_mm": float(res_true.std()),
@@ -304,18 +298,18 @@ def noise_vs_incidence(scan, out: Path) -> dict:
         drop.append(float(100 * (central & b & ~scan.valid).sum() / max((central & b).sum(), 1)))
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.8), constrained_layout=True)
     ax = axes[0]
-    ax.plot(mid, meas, color=BLUE, lw=2, marker="o", ms=5, label="измерено в симуляции")
-    ax.plot(mid, model, color=ORANGE, lw=2, ls="--", label="модель σ (дальность, угол, пятно)")
+    ax.plot(mid, meas, color=BLUE, lw=2, marker="o", ms=5, label="симуляция")
+    ax.plot(mid, model, color=ORANGE, lw=2, ls="--", label="модель σ")
     ax.set_xlabel("угол падения, °")
-    ax.set_ylabel("СКО ошибки дальности, мм")
-    ax.set_title("Шум растёт с углом падения")
+    ax.set_ylabel("СКО, мм")
+    ax.set_title("Шум дальности")
     ax.set_ylim(bottom=0)
     ax.legend(loc="upper left")
     ax = axes[1]
     ax.plot(mid, drop, color=BLUE, lw=2, marker="o", ms=5)
     ax.set_xlabel("угол падения, °")
-    ax.set_ylabel("пропуски, % лучей")
-    ax.set_title("Доля пропусков (слабый сигнал, скользящий луч)")
+    ax.set_ylabel("% лучей")
+    ax.set_title("Пропуски")
     ax.set_ylim(bottom=0)
     fig.savefig(out, dpi=100)
     plt.close(fig)
@@ -337,18 +331,18 @@ def furniture_gallery(out: Path, seed: int = 3) -> None:
         ("Стул", fu.chair(base(0.44, 0.42, 0.9), rng), []),
         ("Диван", fu.sofa(base(2.0, 0.9, 0.85), rng), []),
         ("Кровать", fu.bed(base(1.6, 2.0, 0.5), rng), []),
-        ("Стеллаж с книгами", fu.shelf(base(1.0, 0.35, 1.9), rng), []),
-        ("Шкаф на цоколе", fu.wardrobe(base(1.4, 0.6, 2.2), rng), []),
-        ("Тумба с ТВ", fu.tv_stand(base(1.6, 0.4, 0.5), rng), []),
-        ("Кухонная тумба", fu.counter(base(2.0, 0.6, 0.9), rng), []),
-        ("Обеденный стол", fu.table(base(1.4, 0.85, 0.75), rng), []),
+        ("Стеллаж", fu.shelf(base(1.0, 0.35, 1.9), rng), []),
+        ("Шкаф", fu.wardrobe(base(1.4, 0.6, 2.2), rng), []),
+        ("Тумба ТВ", fu.tv_stand(base(1.6, 0.4, 0.5), rng), []),
+        ("Кухня", fu.counter(base(2.0, 0.6, 0.9), rng), []),
+        ("Стол", fu.table(base(1.4, 0.85, 0.75), rng), []),
         ("Растение", *fu.plant(0.0, 0.0, rng)),
         ("Вешалка", *fu.coat_rack(0.0, 0.0, rng)),
     ]
     from .layout import Wall
 
     wall = Wall(0, (-1.0, 0.0), (1.0, 0.0), 0.1, "interior")
-    items.append(("Радиатор (секции)", fu.radiator(wall, 0.0, 0.05, 1, 1.0, 0.5,
+    items.append(("Радиатор", fu.radiator(wall, 0.0, 0.05, 1, 1.0, 0.5,
                                                    np.random.default_rng(1)), []))
     fig = plt.figure(figsize=(16, 12), constrained_layout=True)
     for k, (name, boxes, prims) in enumerate(items):
@@ -371,8 +365,6 @@ def furniture_gallery(out: Path, seed: int = 3) -> None:
     v, t = curtain_mesh((-1.0, 0.1), (1.0, 0.1), 0.02, 2.4, 0.025, 0.1)
     _draw3d(ax, [v[tri] for tri in t], Poly3DCollection, color="#cfc9ec", alpha=0.5, fit=False)
     ax.set_title("Шторы и тюль")
-    fig.suptitle("Процедурная мебель: лучи проходят под и между частями, как в жизни",
-                 fontweight="bold")
     fig.savefig(out, dpi=80)
     plt.close(fig)
 
@@ -388,17 +380,17 @@ def _mess_scene(rng, scan_dir: str = ""):
 
     groups = []                                    # (подпись, опоры [Box], мягкое [prim])
     ch = fu.chair(base(0.6, 0.6, 0.44, 0.42, 0.9, 0.3), rng)
-    groups.append(("Куртка на спинке стула", ch,
+    groups.append(("Стул + куртка", ch,
                    [fu.drape(max(ch, key=lambda b: b.center[2] + b.size[2] / 2), rng,
                              size=(0.5, 0.9))]))
     bx = Box((2.0, 0.6, 0.25), (0.5, 0.4, 0.5), 0.4)
-    groups.append(("Куртка на коробке", [bx], [fu.drape(bx, rng, size=(0.6, 1.0))]))
+    groups.append(("Коробка + куртка", [bx], [fu.drape(bx, rng, size=(0.6, 1.0))]))
     so = fu.sofa(base(4.2, 0.55, 2.0, 0.9, 0.85, math.pi), rng)
     seat = so[4]
-    groups.append(("Плед на диване", so, [fu.drape(seat, rng, size=(1.2, 1.4))]))
+    groups.append(("Диван + плед", so, [fu.drape(seat, rng, size=(1.2, 1.4))]))
     wall = Box((0.9, 3.95, 1.0), (1.4, 0.1, 2.0), 0.0)                # кусок стены
     jackets = [fu.hanging_cloth((x, 3.88, 1.75), (1, 0, 0), (0, -1, 0), rng) for x in (0.6, 1.15)]
-    groups.append(("Одежда на крючках", [wall], jackets))
+    groups.append(("Крючки", [wall], jackets))
     groups.append(("Сумки, бельё", [], [fu.blob((0.7, 2.2), (0.45, 0.3, 0.35), rng),
                                         fu.blob((1.4, 2.0), (0.6, 0.5, 0.2), rng)]))
     stack, z = [], 0.0
@@ -409,7 +401,7 @@ def _mess_scene(rng, scan_dir: str = ""):
                          float(rng.normal(0, 0.15))))
         z += h
     groups.append(("Стопка коробок", stack, []))
-    groups.append(("Доска у стены", [Box((4.0, 3.95, 1.0), (1.6, 0.1, 2.0), 0.0)],
+    groups.append(("Доска", [Box((4.0, 3.95, 1.0), (1.6, 0.1, 2.0), 0.0)],
                    [fu.leaning_board((4.0, 3.9), (1, 0), (0, -1), rng)]))
     scans = []
     if scan_dir:
@@ -424,7 +416,7 @@ def _mess_scene(rng, scan_dir: str = ""):
             pr = f._scan_prim(role, x, y, z)
             if pr is not None:
                 scans.append(pr)
-        groups.append(("Сканы GSO: обувь, вещи на столе", tbl, scans))
+        groups.append(("Сканы GSO", tbl, scans))
     return groups
 
 
@@ -453,8 +445,10 @@ def mess_gallery(out: Path, scan_dir: str = "", seed: int = 5) -> None:
         ax.set_ylim(c[1] - r, c[1] + r)
         ax.set_zlim(max(0, c[2] - r), c[2] + r)
         ax.set_title(name)
-    fig.suptitle("Беспорядок: опоры (синие) и то, что на них и рядом (оранжевое)",
-                 fontweight="bold")
+    from matplotlib.patches import Patch
+
+    fig.legend(handles=[Patch(color=BLUE, label="опора"), Patch(color=ORANGE, label="мягкое, скан")],
+               loc="lower center", ncol=2)
     fig.savefig(out, dpi=80)
     plt.close(fig)
 
@@ -498,7 +492,7 @@ def mess_scan(out: Path, scan_dir: str = "", seed: int = 5) -> dict:
               LABEL_ID["clutter"]: MAGENTA}
     fig, axes = plt.subplots(1, 2, figsize=(16, 6.2), constrained_layout=True)
     for ax, (i, j, xl, yl, title) in zip(axes, ((0, 1, "x, м", "y, м", "Сверху"),
-                                                (0, 2, "x, м", "z, м", "Спереди (от станции)"))):
+                                                (0, 2, "x, м", "z, м", "Спереди"))):
         for lid, col in colors.items():
             m = lab == lid
             ax.scatter(p[m, i], p[m, j], s=0.4, c=col, linewidths=0, rasterized=True)
@@ -511,12 +505,10 @@ def mess_scan(out: Path, scan_dir: str = "", seed: int = 5) -> dict:
     axes[1].set_ylim(-0.05, 2.7)
     from matplotlib.lines import Line2D
 
-    names = {LABEL_ID["wall"]: "стена", LABEL_ID["floor"]: "пол (15% точек)",
-             LABEL_ID["furniture"]: "мебель", LABEL_ID["clutter"]: "беспорядок, сканы"}
+    names = {LABEL_ID["wall"]: "стена", LABEL_ID["floor"]: "пол",
+             LABEL_ID["furniture"]: "мебель", LABEL_ID["clutter"]: "беспорядок"}
     axes[0].legend(handles=[Line2D([], [], ls="", marker="o", ms=6, color=c, label=names[k])
                             for k, c in colors.items()], loc="upper right", fontsize=9)
-    fig.suptitle("Беспорядок глазами сканера: станция в (3,0; -1,5), высота 1,6 м",
-                 fontweight="bold")
     fig.savefig(out, dpi=90)
     plt.close(fig)
     return {"points": int(len(p)), "clutter_points": int((lab == LABEL_ID["clutter"]).sum())}

@@ -206,7 +206,8 @@ def wall_scores(pred_walls: np.ndarray, mask: np.ndarray, valid: np.ndarray | No
     return out
 
 
-def make_pair(scene_dir, figure: bool = True) -> dict:
+def pair_data(scene_dir) -> dict:
+    """Вход, эталон и всё нужное для отрисовки; файлы input/* пишутся здесь."""
     import cv2
 
     scene_dir = Path(scene_dir)
@@ -225,24 +226,29 @@ def make_pair(scene_dir, figure: bool = True) -> dict:
     mask = cv2.imread(str(scene_dir / "gt" / info["unet"]["file"]), cv2.IMREAD_GRAYSCALE)
     stats = {"frame_px": [frame.height, frame.width], "pixel_mm": round(frame.pixel_m * 1000, 2),
              "stations": res["stations"], **wall_scores(res["walls"], mask, res["valid"])}
-    if figure:
-        pair_figure(stations, frame, res, mask, stats, out / "pair.png")
     (out / "input.json").write_text(json.dumps(stats, indent=1, ensure_ascii=False), encoding="utf-8")
-    return stats
+    return {"name": scene_dir.name, "stations": stations, "frame": frame, "res": res,
+            "mask": mask, "stats": stats}
 
 
-def pair_figure(stations, frame: RasterFrame, res: dict, mask: np.ndarray, stats: dict,
-                path: Path) -> None:
+def make_pair(scene_dir, figure: bool = True) -> dict:
+    d = pair_data(scene_dir)
+    if figure:
+        pair_sheet([d], Path(scene_dir) / "input" / "pair.png")
+    return d["stats"]
+
+
+# ----------------------------------------------------------------------
+# Отрисовка: строка на сцену, столбцы всегда одни и те же:
+#   облако (срез 1,0-1,6 м) | вход | эталон | разница стен
+# Вход и эталон в одной палитре: стена - чернила, окно - бирюза, дверь - оранжевый,
+# не видно - светло-серый. Разница: совпало - серый, лишняя - красный, пропущена - синий.
+# ----------------------------------------------------------------------
+
+def _slice_density(stations, frame: RasterFrame) -> np.ndarray:
     import cv2
 
-    from .debug import AQUA, BLUE, INK2, ORANGE, SURFACE, _plt
-
-    plt = _plt()
-    from matplotlib.colors import to_rgb
-    from matplotlib.patches import Patch
-
-    H, W = mask.shape
-    # срез облака 1,0-1,6 м над полом станции - то, из чего «на глаз» видно стены
+    H, W = frame.height, frame.width
     dens = np.zeros((H, W))
     for st in stations:
         c, p = np.asarray(st["center"]), st["points"]
@@ -255,58 +261,88 @@ def pair_figure(stations, frame: RasterFrame, res: dict, mask: np.ndarray, stats
         i, j = np.round(i).astype(int), np.round(j).astype(int)
         ok = (i >= 0) & (i < H) & (j >= 0) & (j < W)
         np.add.at(dens, (i[ok], j[ok]), 1)
-    dens = cv2.dilate(np.log1p(dens), np.ones((3, 3)))                 # тонкие стены видны и в уменьшении
-    dens = 1 - np.clip(dens / max(np.percentile(dens[dens > 0], 95), 1e-9), 0, 1)
+    dens = cv2.dilate(np.log1p(dens), np.ones((3, 3)))
+    top = np.percentile(dens[dens > 0], 95) if (dens > 0).any() else 1.0
+    return np.clip(dens / max(top, 1e-9), 0, 1)
 
-    def rgb(c):
-        return np.array(to_rgb(c))
 
-    target = np.ones((H, W, 3)) * rgb(SURFACE)
-    target[mask == 64] = rgb("#0b0b0b")
-    target[mask == 128] = rgb(AQUA)
-    target[mask == 192] = rgb(ORANGE)
+def _panels(d: dict):
+    from matplotlib.colors import to_rgb
 
+    from .debug import AQUA, BLUE, INK, ORANGE, RED, SURFACE
+
+    rgb = lambda c: np.array(to_rgb(c))  # noqa: E731
+    mask, res = d["mask"], d["res"]
+    H, W = mask.shape
+    blank = np.ones((H, W, 3)) * rgb(SURFACE)
+
+    cloud = blank * (1 - _slice_density(d["stations"], d["frame"])[..., None] * 0.85)
+    inp = blank.copy()
+    inp[res["unknown"]] = rgb(UNKNOWN)
+    inp[res["walls"]] = rgb(INK)
+    inp[res["window"]] = rgb(AQUA)
+    tgt = blank.copy()
+    tgt[mask == 64] = rgb(INK)
+    tgt[mask == 128] = rgb(AQUA)
+    tgt[mask == 192] = rgb(ORANGE)
     gt = (mask == 64) | (mask == 128)
     pw = res["walls"]
-    over = np.ones((H, W, 3)) * rgb(SURFACE)
-    over[pw & gt] = rgb("#9a9893")
-    over[pw & ~gt] = rgb(ORANGE)
-    over[gt & ~pw] = rgb(BLUE)
-    over[~res["valid"]] = 0.55 * over[~res["valid"]] + 0.45 * rgb("#d6d4cf")    # вне скана - притушено
+    diff = blank.copy()
+    diff[pw & gt] = rgb(MATCH)
+    diff[pw & ~gt] = rgb(RED)
+    diff[gt & ~pw] = rgb(BLUE)
+    out = ~res["valid"]
+    diff[out] = 0.4 * diff[out] + 0.6 * rgb(SURFACE)                    # вне скана - бледно
 
-    fig, axes = plt.subplots(1, 4, figsize=(22, 7.4), constrained_layout=True)
-    panels = [
-        (dens, "gray", "1. Облако: срез 1,0-1,6 м над полом"),
-        (res["image"], "gray", "2. Вход сети: псевдочертёж\nпо свободному пространству"),
-        (target, None, "3. Эталон: маска U-Net\n(стена 64, окно 128, дверь 192)"),
-        (over, None, f"4. Вход против эталона: IoU стен {stats['wall_iou']:.2f}\n"
-                     f"(в отсканированной зоне {stats['wall_iou_scanned']:.2f}; вне её - притушено)"),
-    ]
-    for st in stations:
-        i, j = frame.xy_to_ij(st["center"][0], st["center"][1])
-        axes[0].plot(j, i, marker="o", ms=7, color=ORANGE, mec="white", mew=1.2)
-    for ax, (img, cmap, title) in zip(axes, panels):
-        ax.imshow(img, cmap=cmap, vmin=0, vmax=255 if img.dtype == np.uint8 else 1,
-                  interpolation="nearest")
-        ax.set_title(title)
-        ax.set_xticks([])
-        ax.set_yticks([])
-        for s in ax.spines.values():
-            s.set_color("#d6d4cf")
-    axes[1].legend(handles=[Patch(color="black", label="стена (за кольцом - 0,4 м по умолчанию)"),
-                            Patch(color="#8c8c8c", label="признак окна (лучи ушли наружу)"),
-                            Patch(facecolor="#d7d7d7", edgecolor="#bbb", label="не отсканировано")],
-                   loc="lower center", bbox_to_anchor=(0.5, -0.16), fontsize=9, frameon=False)
-    axes[2].legend(handles=[Patch(color="#0b0b0b", label="стена"), Patch(color=AQUA, label="окно"),
-                            Patch(color=ORANGE, label="дверь")],
-                   loc="lower center", bbox_to_anchor=(0.5, -0.12), ncol=3, fontsize=9, frameon=False)
-    axes[3].legend(handles=[Patch(color="#9a9893", label="совпало"),
-                            Patch(color=ORANGE, label="лишняя стена во входе"),
-                            Patch(color=BLUE, label="стена пропущена")],
-                   loc="lower center", bbox_to_anchor=(0.5, -0.12), ncol=3, fontsize=9, frameon=False)
-    fig.suptitle(f"Обучающая пара (оранжевые точки - станции): {frame.width}x{frame.height} px, "
-                 f"пиксель {stats['pixel_mm']} мм.  Вход без сети, отсканированная зона: точность стен "
-                 f"{stats['wall_precision_scanned']:.2f}, полнота {stats['wall_recall_scanned']:.2f}",
-                 fontweight="bold", color=INK2)
-    fig.savefig(path, dpi=80)
+    # общая обрезка по зданию (эталон и вход) с полем 3 %
+    ys, xs = np.nonzero(gt | (mask > 0) | pw)
+    m = int(0.03 * max(H, W))
+    crop = (slice(max(ys.min() - m, 0), min(ys.max() + m + 1, H)),
+            slice(max(xs.min() - m, 0), min(xs.max() + m + 1, W)))
+    return [x[crop] for x in (cloud, inp, tgt, diff)], crop
+
+
+UNKNOWN, MATCH = "#dcdad5", "#a9a7a1"
+COLUMNS = ("Облако 1,0–1,6 м", "Вход", "Эталон", "Разница стен")
+
+
+def pair_sheet(items: list[dict], path: Path) -> None:
+    """Сетка пар: строка на сцену, 4 одинаковых столбца, одна легенда внизу."""
+    from matplotlib.patches import Patch
+
+    from .debug import AQUA, BLUE, INK, INK2, ORANGE, RED, _plt
+
+    plt = _plt()
+    n = len(items)
+    fig, axes = plt.subplots(n, 4, figsize=(15, 3.9 * n + 0.6), squeeze=False,
+                             gridspec_kw={"wspace": 0.03, "hspace": 0.08})
+    for r, d in enumerate(items):
+        imgs, crop = _panels(d)
+        for c, img in enumerate(imgs):
+            ax = axes[r, c]
+            ax.imshow(img, interpolation="antialiased")
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.grid(False)
+            for sp in ax.spines.values():
+                sp.set_visible(False)
+            if r == 0:
+                ax.set_title(COLUMNS[c], loc="left", fontsize=11, fontweight="normal", color=INK2)
+        for st in d["stations"]:                                       # станции на облаке
+            i, j = d["frame"].xy_to_ij(st["center"][0], st["center"][1])
+            axes[r, 0].plot(j - crop[1].start, i - crop[0].start, "o", ms=5, mfc="white",
+                            mec=INK, mew=1.0)
+        s = d["stats"]
+        axes[r, 0].set_ylabel(f"{d['name'].replace('scene_', '')}\nIoU {s['wall_iou_scanned']:.2f}", rotation=0,
+                              ha="right", va="center", fontsize=10, color=INK2, labelpad=8)
+    handles = [Patch(color=INK, label="стена"), Patch(color=AQUA, label="окно"),
+               Patch(color=ORANGE, label="дверь"), Patch(color=UNKNOWN, label="не видно"),
+               Patch(color=MATCH, label="совпало"), Patch(color=RED, label="лишняя"),
+               Patch(color=BLUE, label="пропущена"),
+               plt.Line2D([], [], ls="", marker="o", mfc="white", mec=INK, label="станция")]
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False,
+               fontsize=10, handlelength=1.2, columnspacing=1.4, bbox_to_anchor=(0.5, 0.0))
+    fig.subplots_adjust(left=0.06, right=0.995, top=1 - 0.35 / (3.9 * n + 0.6),
+                        bottom=0.45 / (3.9 * n + 0.6))
+    fig.savefig(path, dpi=90)
     plt.close(fig)
