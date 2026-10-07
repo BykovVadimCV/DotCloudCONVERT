@@ -169,6 +169,8 @@ class EffectsConfig:
     echo_separation_m: float = 0.4              # ближе - одно (смешанное) эхо
     edge_jump_m: float = 0.01                   # перепад, при котором пиксель считается кромкой
     incidence_noise_power: float = 1.0          # sigma ~ sec(угла падения)^p (Soudarissanane 2011)
+    noise_cap_x_base: float = 6.0               # потолок шума: столько базовых sigma (реальный
+    #                                             BLK360 на скользящих углах - до 15-25)
 
 
 @dataclass

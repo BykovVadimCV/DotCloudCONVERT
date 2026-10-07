@@ -134,6 +134,7 @@ class ScanStats:
 
         ids_all = idx[order]
         up, dn, lf, rt = nb(-1), nb(1), nb(-R), nb(R)
+        up2, dn2, lf2, rt2 = nb(-2), nb(2), nb(-2 * R), nb(2 * R)
         p = xyz[ids]
         r = np.linalg.norm(p, axis=1)
         # шаг углов
@@ -169,16 +170,20 @@ class ScanStats:
             flat = span < 0.05 + 0.02 * r[sel][ok]
             self.noise.append(np.c_[r[sel][ok][flat], np.degrees(np.arccos(np.clip(cosi[flat], 0, 1))),
                                     dev[flat]].astype(np.float32))
-        # перепады вдоль столбца: доля точек между ближней и дальней поверхностью
-        for a, b in ((up, dn), (lf, rt)):
-            m = (a >= 0) & (b >= 0)
-            ra, rb, rc = np.linalg.norm(xyz[a[m]], axis=1), np.linalg.norm(xyz[b[m]], axis=1), r[m]
+        # перепады: a2 a | c | b b2. Перепад - это |b - a| > 15 см при ровных поверхностях
+        # с обеих сторон (|a - a2| и |b - b2| меньше 1/5 перепада). Без этого условия в счёт
+        # шли скользящие поверхности (дальний пол), где средняя точка честно лежит посередине.
+        for a, b, a2, b2 in ((up, dn, up2, dn2), (lf, rt, lf2, rt2)):
+            m = (a >= 0) & (b >= 0) & (a2 >= 0) & (b2 >= 0)
+            nrm_ = lambda q: np.linalg.norm(xyz[q[m]], axis=1)  # noqa: E731
+            ra, rb, ra2, rb2, rc = nrm_(a), nrm_(b), nrm_(a2), nrm_(b2), r[m]
             lo, hi = np.minimum(ra, rb), np.maximum(ra, rb)
-            jump = hi - lo > 0.15
+            jump = (hi - lo > 0.15) & (np.maximum(np.abs(ra - ra2), np.abs(rb - rb2)) < 0.2 * (hi - lo))
             between = jump & (rc > lo + 0.03) & (rc < hi - 0.03)
             self.jumps[0] += int(jump.sum())
             self.jumps[1] += int(between.sum())
             if between.any():
+                # 0 - точка у той поверхности, что ближе к сканеру
                 t = (rc - lo)[between] / (hi - lo)[between]
                 self.jump_pos += np.bincount(np.clip((t * 20).astype(int), 0, 19), minlength=20)
 
@@ -199,7 +204,8 @@ class ScanStats:
 
 
 def _robust_sigma(x: np.ndarray) -> float:
-    return float(1.4826 * np.median(np.abs(x - np.median(x)))) if len(x) else float("nan")
+    """Устойчивое СКО по модулям отклонений (|N(0, s)|: медиана = 0,6745 s)."""
+    return float(1.4826 * np.median(np.abs(x))) if len(x) else float("nan")
 
 
 def noise_summary(tab: np.ndarray) -> dict:
@@ -242,6 +248,7 @@ def _memory_mb() -> float | None:
 # ----------------------------------------------------------------------
 
 def inspect_e57(path, out_dir, chunk: int = 2_000_000, keep_points: int = 1_500_000,
+                keep_total: int = 12_000_000,
                 keep_pairs: int = 300_000, sample: bool = True, sample_voxel_m: float = 0.04,
                 sample_per_scan: int = 200_000, figures: bool = True, zip_result: bool = True,
                 log=print) -> dict:
@@ -286,7 +293,9 @@ def inspect_e57(path, out_dir, chunk: int = 2_000_000, keep_points: int = 1_500_
             has_pose = h.rotation is not None or h.translation is not None
             R = _quat_R(h.rotation) if h.rotation is not None else np.eye(3)
             t = np.asarray(h.translation, float) if h.translation is not None else np.zeros(3)
-            st = ScanStats(n_pts, rows, cols, keep_points, keep_pairs, rng)
+            # выборка на станцию - не больше общего бюджета / число станций (память не растёт)
+            keep = min(keep_points, max(200_000, keep_total // max(len(e57.scans), 1)))
+            st = ScanStats(n_pts, rows, cols, keep, keep_pairs, rng)
             t0 = time.perf_counter()
             for d in e57.iter_points(i, fields, chunk):
                 if cart:
@@ -303,7 +312,7 @@ def inspect_e57(path, out_dir, chunk: int = 2_000_000, keep_points: int = 1_500_
             xyz_l, inten = st.points()
             r_l = np.linalg.norm(xyz_l, axis=1)
             world_coords = bool(len(r_l) and not has_pose and np.median(r_l) > 50)
-            xyz_w = (xyz_l.astype(np.float64) @ R.T + t)
+            xyz_w = (xyz_l.astype(np.float64) @ R.T + t).astype(np.float32)
             stations.append({"center": t, "points": xyz_w})
             tilt = math.degrees(math.acos(np.clip(R[2, 2], -1, 1)))
             info = {
@@ -548,3 +557,85 @@ def _figures(report, stations, samples, plan, out: Path) -> None:
     fig.savefig(out / "sensor.png", dpi=90)
     plt.close(fig)
     del SURFACE
+
+
+# ----------------------------------------------------------------------
+# Сравнение двух отчётов (реальный скан против синтетики): одна мерка для обоих
+# ----------------------------------------------------------------------
+
+def aggregate(report: dict) -> dict:
+    """Сводка отчёта: шум (взвешенно по станциям), перепады, скаляры."""
+    S = report["scans"]
+    tabs = [s["noise"] for s in S if s.get("noise")]
+    out = {}
+    if tabs:
+        sig = np.array([[[np.nan if v is None else v for v in row] for row in t["sigma_mm"]] for t in tabs])
+        cnt = np.array([t["count"] for t in tabs], float)
+        w = np.where(np.isnan(sig), 0, cnt)
+        tot = w.sum(0)
+        out["noise_mm"] = np.where(tot > 2000, np.nansum(np.nan_to_num(sig) * w, 0) / np.maximum(tot, 1), np.nan)
+        out["noise_count"] = tot
+        out["range_bins_m"] = tabs[0]["range_bins_m"]
+        out["incidence_bins_deg"] = tabs[0]["incidence_bins_deg"]
+    hist = np.sum([s["jumps"]["between_position_hist"] for s in S], 0)
+    jumps = sum(s["jumps"]["count"] for s in S)
+    med = lambda k: float(np.median([s[k] for s in S if s.get(k) is not None]))  # noqa: E731
+    out.update({
+        "jump_hist": hist / max(hist.sum(), 1), "jumps": int(jumps),
+        "between_fraction": float(hist.sum() / max(jumps, 1)),
+        "step_deg": med("azimuth_step_deg"),
+        "station_height_m": -med("floor_rel_m"),
+        "valid_fraction": med("valid_fraction"),
+        "intensity_p50": float(np.median([s["intensity"]["p50"] for s in S if s.get("intensity")])),
+        "floor_flatness_mm": med("floor_flatness_mm"),
+        "range_p50_m": float(np.median([s["range_m"]["p50"] for s in S])),
+        "bytes_per_point": report["file"].get("bytes_per_point"),
+    })
+    return out
+
+
+def compare_reports(paths: list, names: list, out: Path) -> str:
+    """Картинка (шум от угла по дальностям, точки на перепадах) и таблица скаляров."""
+    from .debug import AQUA, BLUE, INK2, ORANGE, RED, _plt
+
+    reps = [aggregate(json.loads(Path(p).read_text(encoding="utf-8"))) for p in paths]
+    plt = _plt()
+    fig, axes = plt.subplots(1, 2, figsize=(14, 4.6))
+    styles = ("-", "--", ":", "-.")
+    colors = (BLUE, ORANGE, AQUA, RED)
+    for k, (rep, name) in enumerate(zip(reps, names)):
+        if "noise_mm" in rep:
+            inc = np.array(rep["incidence_bins_deg"] + [85.0])
+            mid = (inc[:-1] + inc[1:]) / 2
+            rb = rep["range_bins_m"] + [None]
+            for j, col in enumerate(colors):
+                if j >= len(rep["noise_mm"]):
+                    break
+                y = rep["noise_mm"][j]
+                if np.isfinite(y).any():
+                    label = f"{rb[j]:g}–{rb[j + 1]:g} м" if k == 0 and rb[j + 1] else None
+                    axes[0].plot(mid, y, styles[k % 4], color=col, marker="o", ms=3, lw=1.5, label=label)
+        axes[1].plot(np.arange(20) / 20 + 0.025, rep["jump_hist"], styles[k % 4], color=INK2, lw=1.8,
+                     label=f"{name}: {rep['between_fraction'] * 100:.0f} %")
+    axes[0].set_title("Шум дальности, мм")
+    axes[0].set_xlabel("угол падения, °")
+    axes[0].set_ylim(bottom=0)
+    handles, labels = axes[0].get_legend_handles_labels()
+    for k, name in enumerate(names):
+        handles.append(plt.Line2D([], [], ls=styles[k % 4], color=INK2))
+        labels.append(name)
+    axes[0].legend(handles, labels, fontsize=8)
+    axes[1].set_title("Точки на перепадах (доля «между»)")
+    axes[1].set_xlabel("0 - ближняя поверхность, 1 - дальняя")
+    axes[1].legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out, dpi=90)
+    plt.close(fig)
+    keys = [("step_deg", "шаг, °", "{:.4f}"), ("station_height_m", "высота станции, м", "{:.3f}"),
+            ("valid_fraction", "с откликом", "{:.3f}"), ("intensity_p50", "интенсивность, медиана", "{:.3f}"),
+            ("floor_flatness_mm", "пол, СКО мм", "{:.1f}"), ("range_p50_m", "дальность, медиана м", "{:.2f}"),
+            ("between_fraction", "перепады «между»", "{:.3f}"), ("bytes_per_point", "Б/точку", "{}")]
+    lines = ["".ljust(26) + "".join(n.ljust(14) for n in names)]
+    for k, label, fmt in keys:
+        lines.append(label.ljust(26) + "".join(fmt.format(r.get(k)).ljust(14) for r in reps))
+    return "\n".join(lines)

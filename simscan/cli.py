@@ -89,6 +89,10 @@ def main(argv: list[str] | None = None) -> None:
     ie.add_argument("--out", help="каталог отчёта (по умолчанию <файл>_report рядом с файлом)")
     ie.add_argument("--no-sample", action="store_true", help="без прореженного облака sample.npz")
     ie.add_argument("--chunk", type=int, default=2_000_000, help="точек за одно чтение")
+    cm = sub.add_parser("compare-e57", help="сравнить отчёты inspect-e57 (реальный скан и синтетика)")
+    cm.add_argument("reports", nargs="+", help="report.json")
+    cm.add_argument("--names", nargs="+")
+    cm.add_argument("--out", default="compare.png")
     pr = sub.add_parser("pair", help="обучающая пара сцены: растр свободного пространства + эталон")
     pr.add_argument("scene_dirs", nargs="+")
     pr.add_argument("--out", help="общая картинка (по умолчанию <сцена>/input/pair.png)")
@@ -102,6 +106,15 @@ def main(argv: list[str] | None = None) -> None:
         kw = {"per_role": args.per_role, "seed": args.seed} if args.source == "gso" \
             else {"max_per_kind": args.per_role}
         print(fn(args.out, max_triangles=args.max_triangles, **kw))
+        return
+    if args.cmd == "compare-e57":
+        from pathlib import Path
+
+        from .inspect_e57 import compare_reports
+
+        names = args.names or [Path(p).parent.name for p in args.reports]
+        print(compare_reports(args.reports, names, Path(args.out)))
+        print(args.out)
         return
     if args.cmd == "inspect-e57":
         from pathlib import Path

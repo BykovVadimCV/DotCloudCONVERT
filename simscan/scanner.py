@@ -297,7 +297,7 @@ class ScanSimulator:
                 diam = self.ecfg.beam_exit_mm / 1000 + p["beam_divergence_rad"] * t
                 tan = np.sqrt(np.clip(sec ** 2 - 1, 0, 130))
                 sig = np.sqrt(sig ** 2 + (diam * tan / math.sqrt(12)) ** 2)
-            sig = np.minimum(sig, 6 * base)
+            sig = np.minimum(sig, self.ecfg.noise_cap_x_base * base)
             noise = rng.normal(0.0, 1.0, n) * np.where(hit, sig, 0.0)
             t = np.where(hit, t + noise, t)
 

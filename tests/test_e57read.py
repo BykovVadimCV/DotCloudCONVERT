@@ -43,3 +43,24 @@ def test_scaled_integer_color_and_odd_bit_widths(tmp_path):
     for k, v in ref.items():
         assert np.allclose(mine[k], v, atol=1e-6), k
     assert r.scans[0].tree["sensorSerialNumber"] == "<скрыто>"
+
+
+def test_inspect_noise_estimate_is_unbiased(tmp_path):
+    """Мерка шума inspect-e57 на синтетике с известной sigma (нормальное падение)."""
+    from simscan.generate import generate_scene
+    from simscan.inspect_e57 import aggregate, inspect_e57
+
+    cfg = box_room_config(6.0, 4.0, layout={"source": "simscan"}, export={"free_space_input": False},
+                          scanner={"angular_step_deg": 0.2, "min_range_m": 0.3},
+                          effects={"range_noise": True, "range_sigma_mm": [1.0, 1.0],
+                                   "range_sigma_per_m_mm": [0.0, 0.0], "incidence_noise_power": 0.0})
+    generate_scene(cfg, tmp_path / "s", seed=0, index=0)
+    import json
+
+    doc = json.loads((tmp_path / "s" / "layout.json").read_text())
+    refl = doc["materials"]["wall"]
+    rep = inspect_e57(tmp_path / "s" / "scan.e57", tmp_path / "r", figures=False, sample=False,
+                      zip_result=False, log=lambda *a: None)
+    est = aggregate(rep)["noise_mm"][1][0]              # 2-4 м, 0-30°
+    true = 1.0 * np.sqrt(0.5 / max(refl, 0.05))         # как в scanner.py
+    assert abs(est / true - 1) < 0.2, (est, true)
