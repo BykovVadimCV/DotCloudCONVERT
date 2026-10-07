@@ -101,6 +101,9 @@ class InteriorConfig:
     lamps: bool = True
     asset_dir: str = ""                 # каталог внешних моделей: <вид>/*.obj|ply|glb|stl
     p_asset: float = 0.5                # доля предметов, заменяемых внешней моделью
+    mess: Range = (0.0, 1.0)            # уровень беспорядка на сцену: ткань, куртки, сумки, стопки
+    scan_dir: str = ""                  # отсканированные предметы: <роль>/*.obj в метрах (simscan assets)
+    scans_per_m2: float = 0.25          # при уровне беспорядка 1
     exterior_ground: bool = True
     ground_drop_m: Range = (0.0, 20.0)  # этаж над землёй
     neighbour_buildings: tuple[int, int] = (0, 4)
@@ -182,6 +185,7 @@ class ExportConfig:
     unet_target_wall_px: float = 30.0           # наружная стена в px, как core/scale_norm.py
     preview: bool = True
     debug: bool = False                         # debug/*.png: панорамы, кромки, неровность, шум
+    free_space_input: bool = True               # input/free_space.png - вход сети (rasterize.py)
 
 
 @dataclass

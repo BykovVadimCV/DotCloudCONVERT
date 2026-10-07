@@ -4,7 +4,8 @@
     scan.e57              по скану на станцию, точки в СК станции, поза в заголовке
     scan_merged.e57       (опция) то же облако одним сканом - режим «без станций»
     labels/scan_NNN.npz   метки точек в порядке записи в E57 (см. README)
-    gt/                   эталонные маски и gt.json
+    gt/                   эталонные маски и gt.json; gt/unet_mask.png - цель сети
+    input/free_space.png  вход сети: псевдочертёж по свободному пространству (rasterize.py)
     layout.json           планировка, станции, позы (истинные и записанные), параметры эффектов
     preview.png           плотностной срез из E57 поверх контуров эталона
     mesh.ply              (опция) сетка сцены с цветами классов
@@ -174,6 +175,11 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
                "points_valid": int(sum(s.n_valid for s in scans))}
     if ex.preview:
         summary.update(render_preview(out / "scan.e57", masks, frame, world, out / "preview.png"))
+    if ex.free_space_input and ex.unet_mask:
+        from .rasterize import make_pair
+
+        pair = make_pair(out, figure=ex.debug)
+        summary["input_wall_iou"] = pair["wall_iou"]
     if ex.debug:
         from .debug import debug_scene
 

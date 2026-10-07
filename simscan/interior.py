@@ -112,6 +112,12 @@ def _box_on_side(clear, side: str, pos: float, w: float, d: float, z0: float, h:
     return rect, Box((cx, cy, z0 + h / 2), (w, d, h), yaw)
 
 
+def _wall_point(clear, side: str, pos: float) -> tuple[float, float]:
+    """Точка на стороне чистого прямоугольника (pos - координата вдоль стороны)."""
+    x0, y0, x1, y1 = clear
+    return {"B": (pos, y0), "T": (pos, y1), "L": (x0, pos), "R": (x1, pos)}[side]
+
+
 def _side_len(clear, side: str) -> tuple[float, float]:
     x0, y0, x1, y1 = clear
     return (x0, x1) if side in "BT" else (y0, y1)
@@ -194,6 +200,8 @@ class Furnisher:
             "ceiling": self._u((0.7, 0.9)), "door": self._u((0.2, 0.8)),
             "window": 0.8, "glass": 0.05, "mirror": 0.9, "exterior": self._u((0.1, 0.4)),
         }
+        self.mess = self._u(self.cfg.mess)
+        layout.meta["mess"] = round(self.mess, 3)
         self._set_doors(layout)
         grids = {r.id: RoomGrid(r) for r in layout.rooms}
         self._reserve_openings(layout, grids)
@@ -209,6 +217,9 @@ class Furnisher:
                 self._extras(layout, room, g)
             self._curtains(layout, room)
             self._clutter(layout, room, g)
+            if self.cfg.furniture:
+                self._mess(layout, room, g)
+                self._scans(layout, room, g)
         if self.cfg.baseboards:
             for room in layout.rooms:
                 self._baseboards(layout, room)
@@ -420,6 +431,169 @@ class Furnisher:
             box = Box((x, y, h / 2), (s, self._u((0.25, 0.6)), h), float(self.rng.uniform(0, math.pi)))
             self._add(layout, "box", "clutter", [box], self._refl(), room.id)
             g.mark((x - s / 2, y - s / 2, x + s / 2, y + s / 2), 0.1)
+
+    # --- беспорядок: мягкие и неровные вещи -----------------------------------
+    def _mess(self, layout: Layout, room: Room, g: RoomGrid) -> None:
+        """Куртка на коробке, плед на диване, сумки, кучи белья, стопки коробок, доски у стены.
+
+        Всё это - не параллелепипеды и не мебель из каталога; уровень беспорядка
+        self.mess (0..1) задаётся на сцену и масштабирует вероятности и количества."""
+        m, rng = self.mess, self.rng
+        if m <= 0 or room.kind == "bath":
+            return
+        # ткань на опорах: стулья, диваны, кровати, коробки, столы
+        for it in [it for it in layout.items if it.room_id == room.id]:
+            if it.kind not in ("chair", "sofa", "bed", "box", "table", "desk") or not it.boxes:
+                continue
+            if rng.random() >= 0.35 * m:
+                continue
+            if it.kind == "chair":
+                support = max(it.boxes, key=lambda b: b.center[2] + b.size[2] / 2)
+            else:
+                big = [b for b in it.boxes if b.size[0] * b.size[1] >= 0.1] or it.boxes
+                support = max(big, key=lambda b: b.center[2] + b.size[2] / 2)
+            prim = fu.drape(support, rng)
+            self._add(layout, "cloth", "clutter", [], self._refl(), room.id, [prim])
+        # одежда на крючках у стены (прихожая - чаще)
+        lam = (2.0 if room.kind == "corridor" else 0.4) * m
+        for _ in range(int(rng.poisson(lam))):
+            side = ("B", "T", "L", "R")[int(rng.integers(4))]
+            lo, hi = _side_len(room.clear, side)
+            w = self._u((0.35, 0.55))
+            if hi - lo < w + 0.2:
+                continue
+            pos = self._u((lo + 0.1, hi - 0.1 - w))
+            rect, box = _box_on_side(room.clear, side, pos, w, 0.25, 0.0, 1.8, gap=0.0)
+            if not g.inside(rect) or g.occ[g._slices(rect)].any():
+                continue
+            along = np.array([math.cos(box.yaw), math.sin(box.yaw), 0.0])
+            normal = np.array([-math.sin(box.yaw), math.cos(box.yaw), 0.0])
+            top = np.array([*_wall_point(room.clear, side, pos + w / 2), self._u((1.6, 1.85))])
+            self._add(layout, "jacket", "clutter", [], self._refl(), room.id,
+                      [fu.hanging_cloth(top + 0.02 * normal, along, normal, rng, width=w)])
+            g.mark(rect, 0.0)
+        # сумки, рюкзаки, кучи белья на полу
+        for _ in range(int(rng.poisson(0.08 * room.area * m))):
+            s = (self._u((0.25, 0.6)), self._u((0.2, 0.45)), self._u((0.15, 0.45)))
+            pts = g.free_points(max(s[0], s[1]) / 2 + 0.05)
+            if not len(pts):
+                break
+            x, y = pts[int(rng.integers(len(pts)))]
+            self._add(layout, "bag", "clutter", [], self._refl(), room.id,
+                      [fu.blob((float(x), float(y)), s, rng)])
+            g.mark((x - s[0] / 2, y - s[0] / 2, x + s[0] / 2, y + s[0] / 2), 0.05)
+        # стопки коробок (переезд, хранение)
+        for _ in range(int(rng.poisson(0.03 * room.area * m))):
+            w, d = self._u((0.3, 0.6)), self._u((0.25, 0.5))
+            pts = g.free_points(max(w, d) / 2 + 0.05)
+            if not len(pts):
+                break
+            x, y = pts[int(rng.integers(len(pts)))]
+            yaw, z, boxes = float(rng.uniform(0, math.pi)), 0.0, []
+            for k in range(int(rng.integers(2, 5))):
+                h = self._u((0.2, 0.45))
+                bw, bd = w * self._u((0.75, 1.0)), d * self._u((0.75, 1.0))
+                ox, oy = rng.normal(0, 0.03, 2)
+                boxes.append(Box((x + ox, y + oy, z + h / 2), (bw, bd, h),
+                                 yaw + float(rng.normal(0, 0.12))))
+                z += h
+            self._add(layout, "box_stack", "clutter", boxes, self._refl(), room.id)
+            r = max(w, d) / 2 + 0.05
+            g.mark((x - r, y - r, x + r, y + r), 0.05)
+        # доски / листы, прислонённые к стене
+        if room.kind in ("room", "corridor") and rng.random() < 0.15 * m:
+            side = ("B", "T", "L", "R")[int(rng.integers(4))]
+            lo, hi = _side_len(room.clear, side)
+            if hi - lo > 1.6:
+                pos = self._u((lo + 0.3, hi - 1.3))
+                rect, box = _box_on_side(room.clear, side, pos, 1.0, 0.7, 0.0, 2.0, gap=0.0)
+                if g.inside(rect) and not g.occ[g._slices(rect)].any():
+                    along = np.array([math.cos(box.yaw), math.sin(box.yaw)])
+                    normal = np.array([-math.sin(box.yaw), math.cos(box.yaw)])
+                    base = np.asarray(_wall_point(room.clear, side, pos + 0.5)) + 0.01 * normal
+                    prim = fu.leaning_board(base, along, normal, rng)
+                    self._add(layout, "board", "clutter", [], self._refl(), room.id, [prim])
+                    g.mark(rect, 0.0)
+
+    # --- отсканированные предметы (Google Scanned Objects и др.) ---------------
+    def _scan_index(self) -> dict:
+        if not hasattr(self, "_scan_idx"):
+            from pathlib import Path
+
+            idx = {}
+            root = Path(self.cfg.scan_dir) if self.cfg.scan_dir else None
+            if root and root.is_dir():
+                for sub in sorted(root.iterdir()):
+                    files = sorted(str(f) for f in sub.glob("*.obj")) if sub.is_dir() else []
+                    if files:
+                        idx[sub.name] = files
+            self._scan_idx = idx
+        return self._scan_idx
+
+    def _scan_prim(self, role: str, x: float, y: float, z: float, max_xy: float | None = None):
+        from .meshes import _load
+
+        files = self._scan_index().get(role)
+        if not files:
+            return None
+        path = files[int(self.rng.integers(len(files)))]
+        v, _ = _load(path)
+        ext = v.max(0) - v.min(0)
+        if max_xy is not None and max(ext[0], ext[1]) > max_xy:
+            return None
+        return {"type": "mesh", "path": path, "center": [float(x), float(y), float(z)],
+                "yaw": float(self.rng.uniform(0, 2 * math.pi)), "native": True, "z_up": True,
+                "size": [float(ext[0]), float(ext[1]), float(ext[2])]}
+
+    def _scans(self, layout: Layout, room: Room, g: RoomGrid) -> None:
+        """Реальные сканы в натуральную величину: обувь у входа, вещи на столах и полках,
+        сумки и игрушки на полу. Роли - подкаталоги scan_dir (см. simscan assets)."""
+        idx, rng, m = self._scan_index(), self.rng, self.mess
+        if not idx or m <= 0:
+            return
+        lam = self.cfg.scans_per_m2 * room.area * m
+        if room.kind == "corridor" and "shoes" in idx:
+            for _ in range(int(rng.poisson(1.5 + 2 * m))):              # пары обуви
+                pts = g.free_points(0.25)
+                if not len(pts):
+                    break
+                x, y = pts[int(rng.integers(len(pts)))]
+                pr = self._scan_prim("shoes", x, y, 0.0)
+                if pr is None:
+                    break
+                twin = dict(pr, center=[x + 0.12 * math.cos(pr["yaw"]),
+                                        y + 0.12 * math.sin(pr["yaw"]), 0.0],
+                            yaw=pr["yaw"] + float(rng.normal(0, 0.15)))
+                self._add(layout, "scan:shoes", "clutter", [], self._refl(), room.id, [pr, twin])
+                g.mark((x - 0.25, y - 0.25, x + 0.25, y + 0.25), 0.0)
+        tops = [b for it in layout.items if it.room_id == room.id and it.kind in
+                ("table", "desk", "counter", "tv_stand", "shelf", "shoe_rack", "nightstand",
+                 "dresser")
+                for b in [max(it.boxes, key=lambda b: b.center[2] + b.size[2] / 2)] if it.boxes]
+        if tops and "tabletop" in idx:
+            for _ in range(int(rng.poisson(lam))):
+                b = tops[int(rng.integers(len(tops)))]
+                if b.center[2] + b.size[2] / 2 > 1.9:
+                    continue
+                du, dv = (rng.uniform(-0.5, 0.5, 2) * np.maximum(np.array(b.size[:2]) - 0.15, 0))
+                c, s = math.cos(b.yaw), math.sin(b.yaw)
+                x, y = b.center[0] + du * c - dv * s, b.center[1] + du * s + dv * c
+                pr = self._scan_prim("tabletop", x, y, b.center[2] + b.size[2] / 2,
+                                     max_xy=min(b.size[0], b.size[1]))
+                if pr is not None:
+                    self._add(layout, "scan:tabletop", "clutter", [], self._refl(), room.id, [pr])
+        if "floor" in idx and room.kind != "bath":
+            for _ in range(int(rng.poisson(0.5 * lam))):
+                pts = g.free_points(0.3)
+                if not len(pts):
+                    break
+                x, y = pts[int(rng.integers(len(pts)))]
+                pr = self._scan_prim("floor", x, y, 0.0)
+                if pr is None:
+                    break
+                self._add(layout, "scan:floor", "clutter", [], self._refl(), room.id, [pr])
+                r = max(pr["size"][:2]) / 2 + 0.05
+                g.mark((x - r, y - r, x + r, y + r), 0.0)
 
     # --- архитектурные детали и предметы, которых нет в коробочной модели ----
     def _door_frames(self, layout: Layout) -> None:

@@ -3,6 +3,8 @@
     python -m simscan generate --out D:/synth --count 200 --seed 0 [--config cfg.yaml] [--workers 2]
     python -m simscan generate --out D:/synth --count 1 --set scanner.angular_step_deg=0.3
     python -m simscan dump-config > cfg.yaml
+    python -m simscan assets --source gso --out D:/scans --per-role 40
+    python -m simscan pair D:/synth/scene_00000          # вход сети и эталон рядом
 """
 from __future__ import annotations
 
@@ -73,7 +75,33 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("scene_dir")
     dbg = sub.add_parser("debug", help="отладочные визуализации сцены в <сцена>/debug")
     dbg.add_argument("scene_dir")
+    a = sub.add_parser("assets", help="скачать реальные 3D-модели (сканы предметов, мебель)")
+    a.add_argument("--source", choices=("gso", "polyhaven", "objaverse"), default="gso")
+    a.add_argument("--out", required=True,
+                   help="gso -> interior.scan_dir; polyhaven/objaverse -> interior.asset_dir")
+    a.add_argument("--per-role", type=int, default=20)
+    a.add_argument("--max-triangles", type=int, default=3000)
+    a.add_argument("--seed", type=int, default=0)
+    pr = sub.add_parser("pair", help="обучающая пара сцены: растр свободного пространства + эталон")
+    pr.add_argument("scene_dir")
     args = ap.parse_args(argv)
+
+    if args.cmd == "assets":
+        from . import assets
+
+        fn = {"gso": assets.fetch_gso, "polyhaven": assets.fetch_polyhaven,
+              "objaverse": assets.fetch_objaverse}[args.source]
+        kw = {"per_role": args.per_role, "seed": args.seed} if args.source == "gso" \
+            else {"max_per_kind": args.per_role}
+        print(fn(args.out, max_triangles=args.max_triangles, **kw))
+        return
+    if args.cmd == "pair":
+        import json
+
+        from .rasterize import make_pair
+
+        print(json.dumps(make_pair(args.scene_dir), ensure_ascii=False, indent=1))
+        return
 
     if args.cmd == "debug":
         import json

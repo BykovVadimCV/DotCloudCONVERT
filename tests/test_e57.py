@@ -42,6 +42,8 @@ def test_points_land_on_scene_surfaces(tmp_path):
     w = doc["meta"]["layout_to_world"]
     world = WorldTransform(w["yaw_deg"], tuple(w["offset_m"]))
     _, solids = build_scene(lay)
+    # surface_distance считает только параллелепипеды; точки на сетках (цилиндры, ткань) - мимо
+    meshed = {s.instance for s in solids if s.mesh is not None}
     rng = np.random.default_rng(0)
     with pye57.E57(str(tmp_path / "s" / "scan.e57")) as e57:
         assert e57.scan_count == len(doc["stations"])
@@ -50,7 +52,7 @@ def test_points_land_on_scene_surfaces(tmp_path):
             xyz = np.c_[d["cartesianX"], d["cartesianY"], d["cartesianZ"]]
             lab = np.load(tmp_path / "s" / "labels" / f"scan_{i:03d}.npz")
             assert len(xyz) == lab["valid"].sum()
-            p = world.to_layout(xyz)
+            p = world.to_layout(xyz)[~np.isin(lab["instance"][lab["valid"]], list(meshed))]
             p = p[rng.choice(len(p), min(len(p), 20000), replace=False)]
             dist = surface_distance(p, solids)
             assert dist.max() < 1e-4, f"скан {i}: {dist.max()}"

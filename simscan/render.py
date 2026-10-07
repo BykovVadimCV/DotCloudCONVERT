@@ -61,6 +61,30 @@ def _rect(wall: Wall, s0, s1, o0, o1):
     return [tuple(wall.point(s, o)) for s, o in ((s0, o0), (s1, o0), (s1, o1), (s0, o1))]
 
 
+def _footprint(prim):
+    """Выпуклая оболочка проекции сетки ниже 1,4 м (или None)."""
+    from .meshes import prim_mesh
+
+    v = prim_mesh(prim)[0]
+    v = v[v[:, 2] < 1.4][:, :2]
+    if len(v) < 3:
+        return None
+    pts = sorted(set(map(tuple, np.round(v, 3))))
+    if len(pts) < 3:
+        return None
+
+    def half(seq):
+        h = []
+        for p in seq:
+            while len(h) >= 2 and ((h[-1][0] - h[-2][0]) * (p[1] - h[-2][1])
+                                   - (h[-1][1] - h[-2][1]) * (p[0] - h[-2][0])) <= 0:
+                h.pop()
+            h.append(p)
+        return h[:-1]
+
+    return half(pts) + half(pts[::-1])
+
+
 def _box_pts(b: Box):
     c, s = math.cos(b.yaw), math.sin(b.yaw)
     hx, hy = b.size[0] / 2, b.size[1] / 2
@@ -102,9 +126,13 @@ def render_plan(layout: Layout, out_png: str | Path, px_per_m: float = 60.0,
                                  outline=(120, 120, 120), width=cv.ss)
                 elif pr["type"] == "curtain":
                     _curtain(cv, pr, (150, 90, 190) if it.kind == "curtains" else (190, 160, 215))
-                elif pr["type"] == "mesh":
+                elif pr["type"] == "mesh" and not pr.get("native"):
                     b = Box(tuple(pr["center"]), tuple(pr["size"]), pr.get("yaw", 0.0))
                     cv.poly(_box_pts(b), fill=(235, 240, 250), outline=(90, 110, 160), width=1)
+                elif pr["type"] in ("mesh", "trimesh"):                 # сканы и мягкие вещи
+                    hull = _footprint(pr)
+                    if hull is not None:
+                        cv.poly(hull, fill=(250, 238, 225), outline=(200, 120, 70), width=1)
     for it in layout.items:
         if it.label == "column":
             for b in it.boxes:

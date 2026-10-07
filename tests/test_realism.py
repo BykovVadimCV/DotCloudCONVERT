@@ -191,6 +191,6 @@ def test_debug_outputs(tmp_path, seed):
     generate_scene(cfg, tmp_path / "s", seed=seed, index=0)
     stats = debug_scene(tmp_path / "s")
     for name in ("plan", "panorama", "edge_closeup", "wall_flatness", "noise_vs_incidence",
-                 "furniture"):
+                 "furniture", "mess", "mess_scan"):
         assert (tmp_path / "s" / "debug" / f"{name}.png").exists(), name
     assert stats["panorama"]["valid_fraction"] > 0.5

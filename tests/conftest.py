@@ -19,7 +19,7 @@ CLEAN_EFFECTS = {
 CLEAN_SCENE = {
     "realism": {"enabled": False},
     "interior": {"p_curtains": 0.0, "p_tulle": 0.0, "p_risers": 0.0, "lamps": False,
-                 "p_plants": 0.0},
+                 "p_plants": 0.0, "mess": [0.0, 0.0]},
 }
 
 

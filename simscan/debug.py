@@ -12,11 +12,14 @@
     wall_flatness.png       отклонение точек одной стены от плоскости: неровность и шум
     noise_vs_incidence.png  шум дальности и доля пропусков от угла падения
     furniture.png           галерея процедурной мебели
+    mess.png                беспорядок: ткань на опорах, куртки, сумки, стопки, доски, сканы
+    mess_scan.png           тот же беспорядок глазами сканера (облако точек по классам)
     stats.json              сводные числа
 """
 from __future__ import annotations
 
 import dataclasses
+import math
 import json
 from pathlib import Path
 
@@ -374,6 +377,151 @@ def furniture_gallery(out: Path, seed: int = 3) -> None:
     plt.close(fig)
 
 
+def _mess_scene(rng, scan_dir: str = ""):
+    """Набор «неудобных» предметов на одной площадке 6 x 4 м (для галереи и скана)."""
+    from . import furniture as fu
+    from .interior import Furnisher
+    from .layout import Box
+
+    def base(x, y, w, d, h, yaw=0.0):
+        return Box((x, y, h / 2), (w, d, h), yaw)
+
+    groups = []                                    # (подпись, опоры [Box], мягкое [prim])
+    ch = fu.chair(base(0.6, 0.6, 0.44, 0.42, 0.9, 0.3), rng)
+    groups.append(("Куртка на спинке стула", ch,
+                   [fu.drape(max(ch, key=lambda b: b.center[2] + b.size[2] / 2), rng,
+                             size=(0.5, 0.9))]))
+    bx = Box((2.0, 0.6, 0.25), (0.5, 0.4, 0.5), 0.4)
+    groups.append(("Куртка на коробке", [bx], [fu.drape(bx, rng, size=(0.6, 1.0))]))
+    so = fu.sofa(base(4.2, 0.55, 2.0, 0.9, 0.85, math.pi), rng)
+    seat = so[4]
+    groups.append(("Плед на диване", so, [fu.drape(seat, rng, size=(1.2, 1.4))]))
+    wall = Box((0.9, 3.95, 1.0), (1.4, 0.1, 2.0), 0.0)                # кусок стены
+    jackets = [fu.hanging_cloth((x, 3.88, 1.75), (1, 0, 0), (0, -1, 0), rng) for x in (0.6, 1.15)]
+    groups.append(("Одежда на крючках", [wall], jackets))
+    groups.append(("Сумки, бельё", [], [fu.blob((0.7, 2.2), (0.45, 0.3, 0.35), rng),
+                                        fu.blob((1.4, 2.0), (0.6, 0.5, 0.2), rng)]))
+    stack, z = [], 0.0
+    for k in range(3):
+        h = float(rng.uniform(0.25, 0.4))
+        stack.append(Box((2.6 + rng.normal(0, 0.03), 2.1 + rng.normal(0, 0.03), z + h / 2),
+                         (0.5 * rng.uniform(0.8, 1), 0.4 * rng.uniform(0.8, 1), h),
+                         float(rng.normal(0, 0.15))))
+        z += h
+    groups.append(("Стопка коробок", stack, []))
+    groups.append(("Доска у стены", [Box((4.0, 3.95, 1.0), (1.6, 0.1, 2.0), 0.0)],
+                   [fu.leaning_board((4.0, 3.9), (1, 0), (0, -1), rng)]))
+    scans = []
+    if scan_dir:
+        f = Furnisher.__new__(Furnisher)
+        f.cfg, f.rng = type("C", (), {"scan_dir": scan_dir})(), rng
+        tbl = fu.table(base(5.0, 2.3, 1.0, 0.7, 0.75), rng)
+        top = max(tbl, key=lambda b: b.center[2])
+        zt = top.center[2] + top.size[2] / 2
+        for role, x, y, z in (("shoes", 4.3, 2.0, 0.0), ("shoes", 4.3, 2.4, 0.0),
+                              ("tabletop", 4.75, 2.2, zt), ("tabletop", 5.0, 2.45, zt),
+                              ("tabletop", 5.25, 2.15, zt), ("floor", 5.0, 1.65, 0.0)):
+            pr = f._scan_prim(role, x, y, z)
+            if pr is not None:
+                scans.append(pr)
+        groups.append(("Сканы GSO: обувь, вещи на столе", tbl, scans))
+    return groups
+
+
+def mess_gallery(out: Path, scan_dir: str = "", seed: int = 5) -> None:
+    """Сетки беспорядка: опоры - синим, мягкое и сканы - оранжевым."""
+    plt = _plt()
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    from .meshes import box_mesh, prim_mesh
+
+    groups = _mess_scene(np.random.default_rng(seed), scan_dir)
+    n = len(groups)
+    cols = 4
+    fig = plt.figure(figsize=(16, 4.2 * ((n + cols - 1) // cols)), constrained_layout=True)
+    for k, (name, boxes, prims) in enumerate(groups):
+        ax = fig.add_subplot((n + cols - 1) // cols, cols, k + 1, projection="3d")
+        hard = [v[tri] for b in boxes for v, t in [box_mesh(b, 0.08)] for tri in t]
+        soft = [v[tri] for pr in prims for v, t in [prim_mesh(pr)] for tri in t]
+        pts = np.concatenate(hard + soft)
+        # одной коллекцией: matplotlib сортирует по глубине только внутри коллекции
+        _draw3d(ax, hard + soft, Poly3DCollection, color=[BLUE] * len(hard) + [ORANGE] * len(soft),
+                fit=False)
+        lo, hi = pts.min(0), pts.max(0)
+        c, r = (lo + hi) / 2, max(hi - lo) / 2 + 0.05
+        ax.set_xlim(c[0] - r, c[0] + r)
+        ax.set_ylim(c[1] - r, c[1] + r)
+        ax.set_zlim(max(0, c[2] - r), c[2] + r)
+        ax.set_title(name)
+    fig.suptitle("Беспорядок: опоры (синие) и то, что на них и рядом (оранжевое)",
+                 fontweight="bold")
+    fig.savefig(out, dpi=80)
+    plt.close(fig)
+
+
+def mess_scan(out: Path, scan_dir: str = "", seed: int = 5) -> dict:
+    """Та же площадка, отсканированная с одной станции: точки по классам, вид сверху и сбоку."""
+    plt = _plt()
+    from .config import load_config
+    from .labels import LABEL_ID
+    from .layout import Box
+    from .meshes import prim_mesh
+    from .scanner import ScanSimulator, Station, sample_effect_params
+    from .scene import SceneMesh, Solid
+
+    rng = np.random.default_rng(seed)
+    solids = [Solid(Box((3.0, 2.0, -0.05), (6.4, 4.4, 0.1), 0.0), "floor", 0, 0.4),
+              Solid(Box((3.0, 3.95, 1.3), (6.4, 0.1, 2.6), 0.0), "wall", 1, 0.7)]
+    inst = 2
+    for name, boxes, prims in _mess_scene(np.random.default_rng(seed), scan_dir):
+        for b in boxes:
+            if b.center[1] > 3.9:                               # куски стены из галереи - уже есть
+                continue
+            lab = "clutter" if "короб" in name else "furniture"
+            solids.append(Solid(b, lab, inst, 0.5))
+        for pr in prims:
+            v, t = prim_mesh(pr)
+            lo, hi = v.min(0), v.max(0)
+            solids.append(Solid(Box(tuple((lo + hi) / 2), tuple(hi - lo + 1e-3), 0.0), "clutter",
+                                inst, 0.5, mesh=(v, t)))
+        inst += 1
+    mesh = SceneMesh.from_solids(solids)
+    cfg = load_config(overrides={"scanner": {"angular_step_deg": 0.12, "min_range_m": 0.3}})
+    sim = ScanSimulator(mesh, cfg.scanner, cfg.effects, sample_effect_params(cfg.effects, rng), rng)
+    st = Station(0, 0, (3.0, -1.5, 1.6), 90.0)
+    scan = sim.scan(st)
+    p = scan.xyz_local[scan.valid] @ st.rotation().T + np.asarray(st.position)
+    lab = scan.label[scan.valid]
+    keep = (lab != LABEL_ID["floor"]) | (rng.random(len(lab)) < 0.15)
+    p, lab = p[keep], lab[keep]
+    colors = {LABEL_ID["wall"]: BLUE, LABEL_ID["floor"]: "#c9c7c0", LABEL_ID["furniture"]: YELLOW,
+              LABEL_ID["clutter"]: MAGENTA}
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6.2), constrained_layout=True)
+    for ax, (i, j, xl, yl, title) in zip(axes, ((0, 1, "x, м", "y, м", "Сверху"),
+                                                (0, 2, "x, м", "z, м", "Спереди (от станции)"))):
+        for lid, col in colors.items():
+            m = lab == lid
+            ax.scatter(p[m, i], p[m, j], s=0.4, c=col, linewidths=0, rasterized=True)
+        ax.set_aspect("equal")
+        ax.set_xlabel(xl)
+        ax.set_ylabel(yl)
+        ax.set_title(title)
+        ax.set_xlim(-0.2, 6.2)
+    axes[0].set_ylim(-0.2, 4.2)
+    axes[1].set_ylim(-0.05, 2.7)
+    from matplotlib.lines import Line2D
+
+    names = {LABEL_ID["wall"]: "стена", LABEL_ID["floor"]: "пол (15% точек)",
+             LABEL_ID["furniture"]: "мебель", LABEL_ID["clutter"]: "беспорядок, сканы"}
+    axes[0].legend(handles=[Line2D([], [], ls="", marker="o", ms=6, color=c, label=names[k])
+                            for k, c in colors.items()], loc="upper right", fontsize=9)
+    fig.suptitle("Беспорядок глазами сканера: станция в (3,0; -1,5), высота 1,6 м",
+                 fontweight="bold")
+    fig.savefig(out, dpi=90)
+    plt.close(fig)
+    return {"points": int(len(p)), "clutter_points": int((lab == LABEL_ID["clutter"]).sum())}
+
+
 def _draw3d(ax, polys, Poly3DCollection, color=BLUE, alpha=0.95, fit=True):
     """Грани с простым освещением (Ламберт), чтобы читалась форма."""
     if not polys:
@@ -386,8 +534,11 @@ def _draw3d(ax, polys, Poly3DCollection, color=BLUE, alpha=0.95, fit=True):
     light = np.array([-0.45, -0.6, 0.66])
     light /= np.linalg.norm(light)
     shade = 0.45 + 0.55 * np.abs(nrm @ light)
-    base = np.array(to_rgb(color))
-    fc = np.clip(base[None] * shade[:, None] + (1 - shade[:, None]) * 0.12, 0, 1)
+    if isinstance(color, (list, tuple)) and len(color) == len(polys):   # цвет на грань
+        base = np.array([to_rgb(c) for c in color])
+    else:
+        base = np.array(to_rgb(color))[None]
+    fc = np.clip(base * shade[:, None] + (1 - shade[:, None]) * 0.12, 0, 1)
     pc = Poly3DCollection(polys, facecolors=np.c_[fc, np.full(len(fc), alpha)], edgecolor="none")
     ax.add_collection3d(pc)
     if fit:
@@ -420,6 +571,9 @@ def debug_scene(scene_dir: str | Path) -> dict:
     stats["wall_flatness"] = wall_flatness(s_on, station, solids, out / "wall_flatness.png")
     stats["noise_vs_incidence"] = noise_vs_incidence(s_on, out / "noise_vs_incidence.png")
     furniture_gallery(out / "furniture.png")
+    mess_gallery(out / "mess.png", cfg.interior.scan_dir)
+    stats["mess_scan"] = mess_scan(out / "mess_scan.png", cfg.interior.scan_dir)
+    stats["mess"] = doc["meta"].get("mess")
     stats["realism"] = {k: v for k, v in doc["meta"].get("realism", {}).items()
                         if k not in ("w", "phi", "w_lean", "phi_lean")}
     (out / "stats.json").write_text(json.dumps(stats, indent=1, ensure_ascii=False), encoding="utf-8")

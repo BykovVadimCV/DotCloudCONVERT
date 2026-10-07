@@ -99,15 +99,23 @@ def _load(path: str):
     return v, t
 
 
-def asset_mesh(path: str, center, size, yaw: float, z_up: bool = True):
-    """Внешняя модель, вписанная в габарит size (вдоль, поперёк, высота) и повёрнутая на yaw.
+def asset_mesh(path: str, center, size, yaw: float, z_up: bool = True, native: bool = False,
+               scale: float = 1.0):
+    """Внешняя модель, повёрнутая на yaw.
 
+    native=False - вписывается в габарит size (вдоль, поперёк, высота) с центром center;
+    native=True  - свой (метрический) размер x scale, центр по XY в center, низ на center[2]
+    (так ставятся сканы: Google Scanned Objects - в метрах).
     Модели из библиотек часто с осью Y вверх (glTF) - тогда z_up=False."""
     v, t = _load(str(Path(path)))
     v = v.copy()
     if not z_up:
         v = v[:, [0, 2, 1]] * np.array([1, -1, 1])
     lo, hi = v.min(0), v.max(0)
+    if native:
+        v = (v - np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]])) * scale
+        v = v @ _rot(yaw).T + np.asarray(center, float)
+        return v, t
     ext = np.maximum(hi - lo, 1e-9)
     v = (v - (lo + hi) / 2) / ext * np.asarray(size, float)
     v = v @ _rot(yaw).T + np.asarray(center, float)
@@ -122,6 +130,9 @@ def prim_mesh(prim: dict):
         return curtain_mesh(prim["p0"], prim["p1"], prim["z0"], prim["z1"], prim["amp"],
                             prim["period"])
     if kind == "mesh":
-        return asset_mesh(prim["path"], prim["center"], prim["size"], prim.get("yaw", 0.0),
-                          prim.get("z_up", True))
+        return asset_mesh(prim["path"], prim["center"], prim.get("size", (1, 1, 1)),
+                          prim.get("yaw", 0.0), prim.get("z_up", True), prim.get("native", False),
+                          prim.get("scale", 1.0))
+    if kind == "trimesh":
+        return np.asarray(prim["v"], float), np.asarray(prim["f"], np.int64)
     raise ValueError(f"неизвестный примитив: {kind}")

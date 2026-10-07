@@ -144,15 +144,16 @@ def plant(x: float, y: float, rng):
 
 
 def coat_rack(x: float, y: float, rng):
+    """Напольная вешалка: стойка на диске и 2-5 вещей на крючках (мягкие сетки)."""
     prims = [{"type": "cylinder", "center": [x, y, 0.015], "radius": 0.2, "height": 0.03},
              {"type": "cylinder", "center": [x, y, 0.9], "radius": 0.02, "height": 1.8}]
-    boxes = []
     for k in range(int(rng.integers(2, 6))):
         a = rng.uniform(0, 2 * math.pi)
-        h = float(rng.uniform(0.6, 0.95))
-        boxes.append(Box((x + 0.15 * math.cos(a), y + 0.15 * math.sin(a), 1.75 - h / 2),
-                         (0.4, 0.12, h), float(a + math.pi / 2)))
-    return boxes, prims
+        normal = np.array([math.cos(a), math.sin(a), 0.0])
+        along = np.array([-math.sin(a), math.cos(a), 0.0])
+        top = np.array([x, y, 1.75]) + 0.03 * normal
+        prims.append(hanging_cloth(top, along, normal, rng))
+    return [], prims
 
 
 def radiator(wall, s: float, face: float, side: int, width: float, height: float, rng) -> list:
@@ -170,3 +171,134 @@ def radiator(wall, s: float, face: float, side: int, width: float, height: float
         c = wall.point(sk, face + side * 0.08)
         boxes.append(Box((*c, z0 + height / 2), (pitch - 0.012, 0.08, height), yaw))
     return boxes
+
+
+# ----------------------------------------------------------------------
+# Беспорядок: мягкие и неровные предметы (сетки задаются явно: type "trimesh")
+# ----------------------------------------------------------------------
+
+def _smooth_noise(rng, n_terms=6, scale=1.0):
+    """Гладкая случайная функция двух переменных (сумма косинусов)."""
+    w = rng.normal(0, scale, (n_terms, 2))
+    ph = rng.uniform(0, 2 * math.pi, n_terms)
+    a = rng.normal(0, 1, n_terms) / math.sqrt(n_terms)
+    return lambda u, v: (a[None] * np.cos(np.stack([u, v], -1) @ w.T + ph)).sum(-1)
+
+
+def drape(support: Box, rng, size=None, floor_z: float = 0.0) -> dict:
+    """Ткань, наброшенная на опору (куртка на коробке или спинке стула, плед на диване).
+
+    Над опорой ткань лежит на её верхней грани, за краями - свисает почти вертикально
+    (чуть отходя от края) до пола или на свою длину; сверху - складки."""
+    sx, sy, sz = support.size
+    top = support.center[2] + sz / 2
+    cw = float(size[0]) if size else float(rng.uniform(0.5, 1.0))     # размеры ткани
+    cd = float(size[1]) if size else float(rng.uniform(0.6, 1.2))
+    du, dv = rng.uniform(-0.25, 0.25, 2) * np.array([sx, sy])
+    n = 16
+    u = np.linspace(-cw / 2, cw / 2, n) + du
+    v = np.linspace(-cd / 2, cd / 2, n) + dv
+    uu, vv = np.meshgrid(u, v, indexing="ij")
+    out_u = np.maximum(np.abs(uu) - sx / 2, 0)                      # насколько за краем опоры
+    out_v = np.maximum(np.abs(vv) - sy / 2, 0)
+    out = np.hypot(out_u, out_v)
+    wr = _smooth_noise(rng, scale=8.0)
+    wrinkle = 0.03 * wr(uu, vv)
+    z = top + 0.01 + np.abs(wrinkle) * (out == 0)
+    z = np.where(out > 0, top - out * 0.92 + wrinkle, z)
+    pooled = np.maximum(floor_z + 0.005 - z, 0) / 0.92          # легло на пол - уходит вбок
+    z = np.maximum(z, floor_z + 0.005)
+    # свисающая часть отходит от грани опоры на 2-6 см (складки, толщина ткани)
+    push = np.minimum(out, 0.04) + 0.02 + 0.02 * np.abs(wr(vv, uu)) + pooled
+    gu = np.where(out_u > 0, np.sign(uu) * (sx / 2 + push), uu)
+    gv = np.where(out_v > 0, np.sign(vv) * (sy / 2 + push), vv)
+    c, s = math.cos(support.yaw), math.sin(support.yaw)
+    x = support.center[0] + gu * c - gv * s
+    y = support.center[1] + gu * s + gv * c
+    verts = np.stack([x, y, z], -1).reshape(-1, 3)
+    return {"type": "trimesh", "v": verts.round(4).tolist(), "f": _grid_faces(n, n)}
+
+
+def hanging_cloth(top_center, along, normal, rng, width=None, length=None) -> dict:
+    """Куртка или полотенце на крючке: сверху узко, книзу шире, с объёмом от стены."""
+    top_center = np.asarray(top_center, float)
+    along = np.asarray(along, float)
+    normal = np.asarray(normal, float)
+    w = float(width or rng.uniform(0.35, 0.55))
+    L = float(length or rng.uniform(0.6, 0.95))
+    n_u, n_v = 9, 10
+    t = np.linspace(0, 1, n_v)                       # сверху вниз
+    s = np.linspace(-0.5, 0.5, n_u)
+    tt, ss = np.meshgrid(t, s, indexing="ij")
+    half = w * (0.25 + 0.75 * np.sqrt(tt))           # плечи шире ворота
+    bulge = 0.12 * np.sin(np.pi * np.clip(tt * 1.2, 0, 1)) * np.cos(np.pi * ss) + 0.02
+    wr = _smooth_noise(rng, scale=6.0)
+    wob = 0.02 * wr(tt * L, ss * w)
+    pts = (top_center[None, None] + (ss * 2 * half)[..., None] * along
+           + (bulge + wob)[..., None] * normal)
+    pts = pts.astype(float)
+    pts[..., 2] = top_center[2] - tt * L
+    return {"type": "trimesh", "v": pts.reshape(-1, 3).round(4).tolist(), "f": _grid_faces(n_v, n_u)}
+
+
+def blob(center_xy, size, rng, floor_z: float = 0.0) -> dict:
+    """Неровная куча: сумка, рюкзак, бельё, мешок. Сфера с гладким радиальным шумом,
+    приплюснутая и поставленная на пол."""
+    sx, sy, sz = (float(v) for v in size)
+    n_lat, n_lon = 9, 14
+    th = np.linspace(0, np.pi, n_lat)
+    ph = np.linspace(0, 2 * np.pi, n_lon, endpoint=False)
+    T, P = np.meshgrid(th, ph, indexing="ij")
+    dirs = np.stack([np.sin(T) * np.cos(P), np.sin(T) * np.sin(P), np.cos(T)], -1)
+    wr = _smooth_noise(rng, n_terms=8, scale=2.5)
+    r = 1.0 + 0.22 * wr(T * 1.3, P)
+    pts = dirs * r[..., None] * np.array([sx / 2, sy / 2, sz / 2])
+    pts[..., 2] = np.maximum(pts[..., 2], -sz / 2 * 0.85)          # плоское дно
+    yaw = float(rng.uniform(0, 2 * np.pi))
+    c, s = math.cos(yaw), math.sin(yaw)
+    x = pts[..., 0] * c - pts[..., 1] * s + center_xy[0]
+    y = pts[..., 0] * s + pts[..., 1] * c + center_xy[1]
+    z = pts[..., 2] - pts[..., 2].min() + floor_z
+    verts = np.stack([x, y, z], -1).reshape(-1, 3)
+    faces = []
+    for i in range(n_lat - 1):
+        for j in range(n_lon):
+            a, b = i * n_lon + j, i * n_lon + (j + 1) % n_lon
+            c2, d = a + n_lon, b + n_lon
+            faces += [[a, b, d], [a, d, c2]]
+    return {"type": "trimesh", "v": verts.round(4).tolist(), "f": faces}
+
+
+def leaning_board(base_xy, wall_dir, out_normal, rng, floor_z: float = 0.0) -> dict:
+    """Доска / лист гипсокартона, прислонённые к стене (наклон 70-82 градуса)."""
+    L = float(rng.uniform(1.5, 2.6))
+    w = float(rng.uniform(0.15, 1.2))
+    t = float(rng.uniform(0.012, 0.03))
+    tilt = math.radians(float(rng.uniform(70, 82)))
+    up = np.array([0.0, 0.0, 1.0])
+    n = np.r_[np.asarray(out_normal, float), 0.0]
+    a = np.r_[np.asarray(wall_dir, float), 0.0]
+    axis = math.sin(tilt) * up - math.cos(tilt) * n          # вдоль доски, верх к стене
+    thick = np.cross(a, axis)
+    if thick @ n < 0:                                        # толщина - от стены в комнату
+        thick = -thick
+    p0 = np.r_[np.asarray(base_xy, float), floor_z] + n * (L * math.cos(tilt))
+    corners = []
+    for k in range(8):
+        cu = (k & 1) * w - w / 2
+        cl = ((k >> 1) & 1) * L
+        ct = ((k >> 2) & 1) * t
+        corners.append(p0 + a * cu + axis * cl + thick * ct)
+    f = [[0, 2, 3], [0, 3, 1], [4, 5, 7], [4, 7, 6], [0, 1, 5], [0, 5, 4],
+         [2, 6, 7], [2, 7, 3], [0, 4, 6], [0, 6, 2], [1, 3, 7], [1, 7, 5]]
+    return {"type": "trimesh", "v": np.round(corners, 4).tolist(), "f": f}
+
+
+def _grid_faces(n_rows: int, n_cols: int) -> list:
+    f = []
+    for i in range(n_rows - 1):
+        for j in range(n_cols - 1):
+            a, b = i * n_cols + j, i * n_cols + j + 1
+            c, d = a + n_cols, b + n_cols
+            f += [[a, b, d], [a, d, c]]
+    return f
