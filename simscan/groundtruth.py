@@ -111,11 +111,13 @@ def build_masks(layout: Layout, solids: list[Solid], frame: RasterFrame,
                 cut_z: float) -> dict[str, np.ndarray]:
     shape = (frame.height, frame.width)
     walls = np.zeros(shape, bool)
+    # ограждения балконов ниже секущей плоскости, но на планах рисуются стеной
+    parapets = {f"wall:{w.id}" for w in layout.walls if w.kind == "parapet"}
     for s in solids:
         if s.label not in PLAN_WALL_LABELS:
             continue
         z0, z1 = s.box.center[2] - s.box.size[2] / 2, s.box.center[2] + s.box.size[2] / 2
-        if z0 <= cut_z < z1:
+        if z0 <= cut_z < z1 or (s.source in parapets and z0 <= 0.0):
             raster_box(frame, walls, s.box)
     doors = np.zeros(shape, bool)
     windows = np.zeros(shape, bool)
@@ -125,7 +127,8 @@ def build_masks(layout: Layout, solids: list[Solid], frame: RasterFrame,
     windows &= ~walls
     rooms = np.zeros(shape, np.uint16)
     for r in layout.rooms:
-        raster_rect(frame, rooms, r.cell, r.id + 1)
+        for rect in (r.region or [r.cell]):
+            raster_rect(frame, rooms, rect, r.id + 1)
     rooms[walls | doors | windows] = 0
     classes = np.zeros(shape, np.uint8)
     classes[walls], classes[doors], classes[windows] = 1, 2, 3
@@ -172,6 +175,37 @@ def describe(layout: Layout, masks: dict, frame: RasterFrame, world: WorldTransf
         "openings": openings,
         "rooms": rooms,
     }
+
+
+# Маска U-Net ReFloorBRUSNIKA (datasetgen UNetSemanticClasses): значение = класс * 64.
+UNET_VALUES = {"background": 0, "wall": 64, "window": 128, "door": 192}
+
+
+def unet_frame(layout: Layout, target_wall_px: float, pad_m: float) -> RasterFrame:
+    """Квадратный кадр, в котором наружная стена занимает target_wall_px пикселей
+    (так ReFloorBRUSNIKA нормирует масштаб перед U-Net, core/scale_norm.py)."""
+    p = layout.meta["t_ext"] / target_wall_px
+    x0, y0, x1, y1 = layout.bbox()
+    side = max(x1 - x0, y1 - y0) + 2 * pad_m
+    n = int(math.ceil(side / p))
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    return RasterFrame(cx - n * p / 2, cy - n * p / 2, p, n, n)
+
+
+def unet_mask(layout: Layout, solids: list[Solid], frame: RasterFrame, cut_z: float) -> np.ndarray:
+    """Стены 64, окна 128, двери 192. К двери, как в datasetgen, относится и полотно
+    (открытое полотно реально видно в скане); дуги открывания нет - в облаке её нет."""
+    m = build_masks(layout, solids, frame, cut_z)
+    out = np.zeros(m["walls"].shape, np.uint8)
+    out[m["walls"]] = UNET_VALUES["wall"]
+    out[m["windows"]] = UNET_VALUES["window"]
+    out[m["doors"]] = UNET_VALUES["door"]
+    leaves = np.zeros_like(m["walls"])
+    for s in solids:
+        if s.label == "door":
+            raster_box(frame, leaves, s.box)
+    out[leaves & (out == 0)] = UNET_VALUES["door"]
+    return out
 
 
 def save_gt(out_dir: str | Path, masks: dict, info: dict) -> None:

@@ -185,6 +185,7 @@ class ScanSimulator:
         t, prim, nrm, hit = self._cast(scene, o, d)
         n = len(t)
         virtual = np.zeros(n, bool)
+        via_special = np.zeros(n, bool)    # луч задел стекло или зеркало
         dir_eff = d.copy()                 # направление последнего сегмента луча (для угла падения)
 
         def lookup(sel):
@@ -208,6 +209,7 @@ class ScanSimulator:
                 g = np.nonzero(hit & (label == GLASS) & ~settled)[0] if ecfg.glass else np.empty(0, int)
                 m = np.nonzero(hit & (label == MIRROR))[0] if ecfg.mirrors else np.empty(0, int)
                 if len(g):
+                    via_special[g] = True
                     through = rng.random(len(g)) < p["p_glass_pass"]
                     stop = g[~through]
                     settled[stop] = True
@@ -222,6 +224,7 @@ class ScanSimulator:
                     dm = dir_eff[m]
                     new_dir[len(g):] = dm - 2 * np.sum(dm * nm, axis=1, keepdims=True) * nm
                     virtual[m] = True
+                    via_special[m] = True
                 o2 = seg_o[idx] + dir_eff[idx] * seg_t[idx, None] + new_dir * 1e-3
                 t2, prim2, nrm2, hit2 = self._cast(scene, o2, new_dir)
                 t[idx] = t[idx] + 1e-3 + t2
@@ -255,7 +258,8 @@ class ScanSimulator:
         # --- смешанные пиксели ----------------------------------------------
         mixed = np.zeros(n, bool)
         if ecfg.mixed_pixels and p["p_mixed"] > 0:
-            mixed = self._mixed_pixels(t, hit, p["p_mixed"])
+            # у стекла «перепад» между соседями - случайность прохода, а не кромка
+            mixed = self._mixed_pixels(t, hit & ~via_special, p["p_mixed"])
 
         # --- шум дальности --------------------------------------------------
         if ecfg.range_noise and p["range_sigma_m"] > 0:

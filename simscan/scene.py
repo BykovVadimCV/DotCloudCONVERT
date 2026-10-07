@@ -155,7 +155,7 @@ class SceneBuilder:
     # --- стены -------------------------------------------------------------
     def wall_pieces(self, wall: Wall) -> list[tuple[float, float, float, float]]:
         """Куски тела стены (s_a, s_b, z_a, z_b) после вырезания проёмов."""
-        H = self.layout.ceiling_height
+        H = wall.height if wall.height is not None else self.layout.ceiling_height
         ops = sorted(self.layout.openings_on(wall.id), key=lambda o: o.s)
         pieces = []
         cur = -wall.ext0
@@ -246,17 +246,18 @@ class SceneBuilder:
     def _slabs(self, mat: dict) -> None:
         H = self.layout.ceiling_height
         floor_i, ceil_i = self._new_instance(), self._new_instance()
-        for r in self.layout.rooms:
-            x0, y0, x1, y1 = r.cell
+        for k, (x0, y0, x1, y1) in enumerate(self.layout.slab_rects()):
             cx, cy, sx, sy = (x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0
             self._add(Box((cx, cy, -SLAB_M / 2), (sx, sy, SLAB_M)), "floor",
-                      mat.get("floor", 0.4), f"slab:{r.id}", floor_i)
+                      mat.get("floor", 0.4), f"slab:{k}", floor_i)
             self._add(Box((cx, cy, H + SLAB_M / 2), (sx, sy, SLAB_M)), "ceiling",
-                      mat.get("ceiling", 0.8), f"slab:{r.id}", ceil_i)
+                      mat.get("ceiling", 0.8), f"slab:{k}", ceil_i)
+        for r in self.layout.rooms:
             if r.ceiling_z < H - 1e-6:
-                a, b, c, d = r.clear
-                box = Box(((a + c) / 2, (b + d) / 2, r.ceiling_z + 0.01), (c - a, d - b, 0.02))
-                self._add(box, "fixture", mat.get("ceiling", 0.8), f"suspended:{r.id}")
+                inst = self._new_instance()
+                for a, b, c, d in r.rects():
+                    box = Box(((a + c) / 2, (b + d) / 2, r.ceiling_z + 0.01), (c - a, d - b, 0.02))
+                    self._add(box, "fixture", mat.get("ceiling", 0.8), f"suspended:{r.id}", inst)
 
 
 def build_scene(layout: Layout) -> tuple[SceneMesh, list[Solid]]:

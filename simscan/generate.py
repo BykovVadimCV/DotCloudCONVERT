@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import asdict
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -21,7 +22,8 @@ import numpy as np
 from . import __version__
 from .config import SynthConfig, config_to_dict
 from .e57io import write_e57, write_merged_e57
-from .groundtruth import build_masks, describe, frame_for, save_gt
+from .groundtruth import (UNET_VALUES, build_masks, describe, frame_for, save_gt, unet_frame,
+                          unet_mask)
 from .interior import Furnisher
 from .layout import LayoutGenerator
 from .preview import render_preview
@@ -34,13 +36,34 @@ def scene_rng(seed: int, index: int) -> np.random.Generator:
     return np.random.default_rng(np.random.SeedSequence([seed, index]))
 
 
+_DATASETGEN = {}
+
+
+def make_layout(cfg: SynthConfig, rng: np.random.Generator, seed: int, index: int):
+    lc = cfg.layout
+    if lc.source == "simscan":
+        return LayoutGenerator(lc, rng).generate()
+    if lc.source == "datasetgen":
+        from .datasetgen_adapter import extract_plan, layout_from_plan, load_datasetgen
+
+        if not lc.datasetgen_path:
+            raise ValueError("layout.datasetgen_path не задан")
+        dg = _DATASETGEN.get(lc.datasetgen_path) or load_datasetgen(lc.datasetgen_path)
+        _DATASETGEN[lc.datasetgen_path] = dg
+        dg_seed = int(np.random.SeedSequence([seed, index, 1]).generate_state(1)[0] % 2**31)
+        plan = extract_plan(dg, dg_seed, lc.datasetgen_strategies,
+                            lc.datasetgen_balcony_probability)
+        return layout_from_plan(plan, lc, rng)
+    raise ValueError(f"неизвестный layout.source: {lc.source}")
+
+
 def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: int = 0) -> dict:
     t_start = time.perf_counter()
     rng = scene_rng(seed, index)
     out = Path(out_dir)
     (out / "labels").mkdir(parents=True, exist_ok=True)
 
-    layout = LayoutGenerator(cfg.layout, rng).generate()
+    layout = make_layout(cfg, rng, seed, index)
     grids = Furnisher(cfg.interior, rng).furnish(layout)
     stations = place_stations(layout, grids, cfg.scanner, rng)
     if not stations:
@@ -104,7 +127,16 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
     masks = build_masks(layout, solids, frame, ex.cut_height_m)
     info = describe(layout, masks, frame, world, ex.cut_height_m)
     info["stations"] = station_info
+    if ex.unet_mask:
+        uframe = unet_frame(layout, ex.unet_target_wall_px, ex.pad_m)
+        info["unet"] = {"frame": asdict(uframe), "target_wall_px": ex.unet_target_wall_px,
+                        "values": UNET_VALUES, "file": "unet_mask.png"}
     save_gt(out / "gt", masks, info)
+    if ex.unet_mask:
+        import cv2
+
+        cv2.imwrite(str(out / "gt" / "unet_mask.png"),
+                    unet_mask(layout, solids, uframe, ex.cut_height_m))
 
     doc = layout.to_dict()
     doc["meta"].update({

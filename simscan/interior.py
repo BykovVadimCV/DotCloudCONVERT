@@ -25,6 +25,20 @@ class RoomGrid:
         self.ny = max(1, int(round((self.y1 - self.y0) / RES)))
         self.occ = np.zeros((self.ny, self.nx), bool)        # ничего ставить нельзя
         self.no_tall = np.zeros((self.ny, self.nx), bool)    # нельзя высокое (окна, зеркала)
+        if room.region:                                      # непрямоугольное помещение
+            self.occ[:] = True
+            for rect in room.region:
+                self.occ[self._slices_inner(rect)] = False
+
+    def _slices_inner(self, rect):
+        """Клетки, целиком лежащие в прямоугольнике."""
+        xa, ya, xb, yb = rect
+        i0 = int(math.ceil((xa - self.x0) / RES - 1e-6))
+        i1 = int(math.floor((xb - self.x0) / RES + 1e-6))
+        j0 = int(math.ceil((ya - self.y0) / RES - 1e-6))
+        j1 = int(math.floor((yb - self.y0) / RES + 1e-6))
+        return (slice(max(j0, 0), max(min(j1, self.ny), 0)),
+                slice(max(i0, 0), max(min(i1, self.nx), 0)))
 
     def _slices(self, rect):
         xa, ya, xb, yb = rect
@@ -69,8 +83,13 @@ def wall_rect(wall: Wall, s_a: float, s_b: float, off_a: float, off_b: float):
     return (*pts.min(0), *pts.max(0))
 
 
-def room_side(wall: Wall, room: Room) -> int:
-    """С какой стороны стены (по левой нормали) лежит помещение."""
+def room_side(wall: Wall, room: Room, s: float | None = None) -> int:
+    """С какой стороны стены (по левой нормали) лежит помещение (у точки s, если задана)."""
+    if s is not None:
+        for side in (1, -1):
+            p = wall.point(s, side * (wall.thickness / 2 + 0.02))
+            if room.contains(*p):
+                return side
     x0, y0, x1, y1 = room.cell
     c = np.array([(x0 + x1) / 2, (y0 + y1) / 2])
     return 1 if float(np.dot(c - np.asarray(wall.p0), wall.n)) > 0 else -1
@@ -178,7 +197,7 @@ class Furnisher:
             wall = layout.wall(o.wall_id)
             for rid in o.rooms:
                 room = layout.rooms[rid]
-                side = room_side(wall, room)
+                side = room_side(wall, room, o.s)
                 face = side * wall.thickness / 2
                 if o.kind == "window":
                     rect = wall_rect(wall, o.s - o.width / 2 - 0.1, o.s + o.width / 2 + 0.1,
@@ -198,7 +217,7 @@ class Furnisher:
                 if o.kind != "window" or room.id not in o.rooms or o.z0 < 0.45:
                     continue
                 wall = layout.wall(o.wall_id)
-                side = room_side(wall, room)
+                side = room_side(wall, room, o.s)
                 face = side * wall.thickness / 2
                 w = min(o.width, 1.2)
                 h = min(0.5, o.z0 - 0.15)
@@ -208,7 +227,7 @@ class Furnisher:
                 g.mark(wall_rect(wall, o.s - w / 2, o.s + w / 2, face, face + side * 0.15), 0.0)
 
         sides = ["B", "T", "L", "R"]
-        if rng.random() < cfg.p_soffit:
+        if rng.random() < cfg.p_soffit and len(room.rects()) == 1:
             side = sides[int(rng.integers(4))]
             a, b = _side_len(room.clear, side)
             d, h = self._u((0.2, 0.5)), self._u((0.2, 0.4))
@@ -350,11 +369,46 @@ class Furnisher:
             g.mark((x - s / 2, y - s / 2, x + s / 2, y + s / 2), 0.1)
 
     # --- плинтусы ----------------------------------------------------------
+    def _door_gaps(self, layout: Layout, vertical: bool, coord: float) -> list:
+        """Интервалы дверей и арок на линии грани (x = coord или y = coord)."""
+        gaps = []
+        for o in layout.openings:
+            if o.z0 > 0.05:
+                continue
+            wall = layout.wall(o.wall_id)
+            if (abs(wall.u[0]) < 0.5) != vertical:
+                continue
+            line = wall.p0[0] if vertical else wall.p0[1]
+            if abs(line - coord) > wall.thickness / 2 + 0.02:
+                continue
+            c = wall.point(o.s)[1 if vertical else 0]
+            gaps.append((c - o.width / 2, c + o.width / 2))
+        return gaps
+
     def _baseboards(self, layout: Layout, room: Room) -> None:
         x0, y0, x1, y1 = room.clear
         h, d = 0.07, 0.015
         refl = self._u((0.3, 0.9))
         boxes = []
+        if room.wall_edges:
+            for ex0, ey0, ex1, ey1, nx, ny in room.wall_edges:
+                vertical = abs(ex0 - ex1) < 1e-9
+                a, b = (ey0, ey1) if vertical else (ex0, ex1)
+                coord = ex0 if vertical else ey0
+                for sa, sb in _subtract_intervals((min(a, b), max(a, b)),
+                                                  self._door_gaps(layout, vertical, coord)):
+                    if sb - sa < 0.1:
+                        continue
+                    if vertical:
+                        c = (coord + nx * d / 2, (sa + sb) / 2)
+                        box = Box((c[0], c[1], h / 2), (sb - sa, d, h), math.pi / 2)
+                    else:
+                        c = ((sa + sb) / 2, coord + ny * d / 2)
+                        box = Box((c[0], c[1], h / 2), (sb - sa, d, h), 0.0)
+                    boxes.append(box)
+            if boxes:
+                self._add(layout, "baseboard", "fixture", boxes, refl, room.id)
+            return
         for side in ("B", "T", "L", "R"):
             a, b = _side_len(room.clear, side)
             coord = {"B": y0, "T": y1, "L": x0, "R": x1}[side]

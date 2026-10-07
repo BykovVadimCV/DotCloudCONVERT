@@ -1,6 +1,26 @@
 # Конфигурация simscan по умолчанию (python -m simscan dump-config).
 # Описание параметров - в simscan/config.py.
 layout:
+  source: simscan
+  datasetgen_path: ''
+  datasetgen_strategies:
+  - central
+  - linear
+  - radial
+  - graph
+  - open_plan
+  - asymmetric
+  - courtyard
+  - spine
+  datasetgen_long_side_m:
+  - 8.0
+  - 16.0
+  datasetgen_min_room_m2: 0.5
+  datasetgen_balcony_probability: 0.7
+  parapet_height_m:
+  - 1.0
+  - 1.1
+  parapet_thickness_m: 0.12
   footprint_x_m:
   - 6.0
   - 16.0
@@ -154,4 +174,6 @@ export:
   - 150.0
   write_merged: false
   write_mesh: false
+  unet_mask: true
+  unet_target_wall_px: 30.0
   preview: true

@@ -35,10 +35,12 @@ class Wall:
     p0: tuple[float, float]          # ось стены, начало
     p1: tuple[float, float]          # ось стены, конец
     thickness: float
-    kind: str                        # "exterior" | "interior"
+    kind: str                        # "exterior" | "interior" | "parapet" (ограждение балкона)
     outward: int = 0                 # наружная: +1/-1 - сторона улицы по левой нормали
     ext0: float = 0.0                # удлинение тела за p0 (наружные углы, стыки)
     ext1: float = 0.0                # удлинение тела за p1
+    height: float | None = None      # None - до перекрытия
+    role: str = ""                   # "balcony_interface" - стена между комнатой и балконом
 
     @property
     def length(self) -> float:
@@ -85,14 +87,28 @@ class Room:
     id: int
     cell: tuple[float, float, float, float]     # xmin, ymin, xmax, ymax по осям стен
     clear: tuple[float, float, float, float]    # чистый прямоугольник (консервативно)
-    kind: str = "room"                          # room | corridor | bath | kitchen
+    kind: str = "room"                          # room | corridor | bath | kitchen | balcony
     ceiling_z: float = 0.0                      # низ потолка (подвесной ниже перекрытия)
     scanned: bool = True
+    # Непрямоугольное помещение: точное покрытие чистой площади прямоугольниками
+    # (пусто - помещение совпадает с clear) и грани стен вдоль контура
+    # (x0, y0, x1, y1, nx, ny), нормаль внутрь помещения - для плинтусов.
+    region: list = field(default_factory=list)
+    wall_edges: list = field(default_factory=list)
 
     @property
     def area(self) -> float:
-        x0, y0, x1, y1 = self.clear
-        return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+        return sum(max(0.0, x1 - x0) * max(0.0, y1 - y0) for x0, y0, x1, y1 in self.rects())
+
+    def rects(self) -> list:
+        """Прямоугольники чистой площади."""
+        return list(self.region) if self.region else [self.clear]
+
+    def contains(self, x: float, y: float) -> bool:
+        if self.region:
+            return any(a <= x < c and b <= y < d for a, b, c, d in self.region)
+        x0, y0, x1, y1 = self.cell
+        return x0 < x < x1 and y0 < y < y1
 
 
 @dataclass
@@ -121,6 +137,7 @@ class Layout:
     items: list[Item] = field(default_factory=list)
     materials: dict = field(default_factory=dict)   # отражательная способность поверхностей
     meta: dict = field(default_factory=dict)
+    footprint: list = field(default_factory=list)   # прямоугольники под перекрытиями (пусто - ячейки помещений)
 
     def wall(self, wall_id: int) -> Wall:
         return self.walls[wall_id]
@@ -140,10 +157,12 @@ class Layout:
 
     def room_at(self, x: float, y: float) -> int | None:
         for r in self.rooms:
-            x0, y0, x1, y1 = r.cell
-            if x0 < x < x1 and y0 < y < y1:
+            if r.contains(x, y):
                 return r.id
         return None
+
+    def slab_rects(self) -> list:
+        return list(self.footprint) if self.footprint else [r.cell for r in self.rooms]
 
     # --- JSON -----------------------------------------------------------
     def to_dict(self) -> dict:
@@ -156,6 +175,7 @@ class Layout:
             "openings": [asdict(o) for o in self.openings],
             "items": [asdict(i) for i in self.items],
             "materials": self.materials,
+            "footprint": [list(r) for r in self.footprint],
             "meta": self.meta,
         }
 
@@ -164,7 +184,12 @@ class Layout:
         def tup(x):
             return tuple(x) if isinstance(x, list) else x
 
-        rooms = [Room(**{k: tup(v) for k, v in r.items()}) for r in d["rooms"]]
+        rooms = []
+        for r in d["rooms"]:
+            r = dict(r)
+            region = [tuple(x) for x in r.pop("region", [])]
+            edges = [tuple(x) for x in r.pop("wall_edges", [])]
+            rooms.append(Room(**{k: tup(v) for k, v in r.items()}, region=region, wall_edges=edges))
         walls = [Wall(**{k: tup(v) for k, v in w.items()}) for w in d["walls"]]
         openings = [Opening(**{k: tup(v) for k, v in o.items()}) for o in d["openings"]]
         items = []
@@ -173,7 +198,8 @@ class Layout:
             items.append(Item(it["id"], it["kind"], it["label"], boxes,
                               it["reflectance"], it.get("room_id")))
         return cls(d["ceiling_height"], rooms, walls, openings, items,
-                   d.get("materials", {}), d.get("meta", {}))
+                   d.get("materials", {}), d.get("meta", {}),
+                   [tuple(x) for x in d.get("footprint", [])])
 
     def save_json(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.to_dict(), indent=1, ensure_ascii=False),

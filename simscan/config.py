@@ -22,6 +22,15 @@ Range = tuple[float, float]
 
 @dataclass
 class LayoutConfig:
+    source: str = "simscan"             # "simscan" - свой генератор, "datasetgen" - ReFloorBRUSNIKA
+    datasetgen_path: str = ""           # путь к datasetgen.py или к его каталогу
+    datasetgen_strategies: tuple[str, ...] = ("central", "linear", "radial", "graph", "open_plan",
+                                              "asymmetric", "courtyard", "spine")
+    datasetgen_long_side_m: Range = (8.0, 16.0)   # масштаб px -> м по длинной стороне здания
+    datasetgen_min_room_m2: float = 0.5           # меньше - пустота между стенами, не помещение
+    datasetgen_balcony_probability: float = 0.7
+    parapet_height_m: Range = (1.0, 1.1)          # ограждение балкона
+    parapet_thickness_m: float = 0.12
     footprint_x_m: Range = (6.0, 16.0)
     footprint_y_m: Range = (5.0, 12.0)
     rooms: tuple[int, int] = (3, 9)
@@ -124,6 +133,8 @@ class ExportConfig:
     world_z_offset_m: Range = (-50.0, 150.0)    # абсолютная отметка пола
     write_merged: bool = False                  # дополнительный E57 «одним сканом»
     write_mesh: bool = False                    # mesh.ply с цветами классов
+    unet_mask: bool = True                      # gt/unet_mask.png в формате datasetgen (ReFloorBRUSNIKA)
+    unet_target_wall_px: float = 30.0           # наружная стена в px, как core/scale_norm.py
     preview: bool = True
 
 
