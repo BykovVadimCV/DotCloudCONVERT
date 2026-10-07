@@ -1,0 +1,160 @@
+"""Генерация одной сцены и набора сцен.
+
+Каталог сцены:
+    scan.e57              по скану на станцию, точки в СК станции, поза в заголовке
+    scan_merged.e57       (опция) то же облако одним сканом - режим «без станций»
+    labels/scan_NNN.npz   метки точек в порядке записи в E57 (см. README)
+    gt/                   эталонные маски и gt.json
+    layout.json           планировка, станции, позы (истинные и записанные), параметры эффектов
+    preview.png           плотностной срез из E57 поверх контуров эталона
+    mesh.ply              (опция) сетка сцены с цветами классов
+"""
+from __future__ import annotations
+
+import json
+import time
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+import numpy as np
+
+from . import __version__
+from .config import SynthConfig, config_to_dict
+from .e57io import write_e57, write_merged_e57
+from .groundtruth import build_masks, describe, frame_for, save_gt
+from .interior import Furnisher
+from .layout import LayoutGenerator
+from .preview import render_preview
+from .scanner import ScanSimulator, people_for_station, place_stations, sample_effect_params
+from .scene import build_scene
+from .transform import WorldTransform, small_rotation
+
+
+def scene_rng(seed: int, index: int) -> np.random.Generator:
+    return np.random.default_rng(np.random.SeedSequence([seed, index]))
+
+
+def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: int = 0) -> dict:
+    t_start = time.perf_counter()
+    rng = scene_rng(seed, index)
+    out = Path(out_dir)
+    (out / "labels").mkdir(parents=True, exist_ok=True)
+
+    layout = LayoutGenerator(cfg.layout, rng).generate()
+    grids = Furnisher(cfg.interior, rng).furnish(layout)
+    stations = place_stations(layout, grids, cfg.scanner, rng)
+    if not stations:
+        raise RuntimeError("не удалось поставить ни одной станции")
+    mesh, solids = build_scene(layout)
+
+    ex = cfg.export
+    world = WorldTransform(
+        float(rng.uniform(0, 360)) if ex.world_yaw else 0.0,
+        (float(rng.uniform(*ex.world_offset_m)), float(rng.uniform(*ex.world_offset_m)),
+         float(rng.uniform(*ex.world_z_offset_m))),
+    )
+    params = sample_effect_params(cfg.effects, rng)
+    sim = ScanSimulator(mesh, cfg.scanner, cfg.effects, params, rng)
+
+    scans, poses, station_info = [], [], []
+    for k, st in enumerate(stations):
+        people = []
+        if cfg.effects.people:
+            lo, hi = cfg.effects.people_per_station
+            people = people_for_station(st, grids, int(rng.integers(lo, hi + 1)), rng,
+                                        instance0=1_000_000 + 100 * k)
+        scan = sim.scan(st, people)
+        # истинная поза в СК объекта
+        R_true = world.R @ st.rotation()
+        t_true = world.to_world(np.array(st.position)[None])[0]
+        # записанная поза: первая станция - опорная, остальные с ошибкой регистрации
+        R_w, t_w = R_true, t_true
+        if cfg.effects.registration_error and k > 0:
+            R_w = small_rotation(params["registration_sigma_deg"], rng) @ R_true
+            t_w = t_true + rng.normal(0, params["registration_sigma_m"], 3)
+        scans.append(scan)
+        poses.append((R_w, t_w))
+        station_info.append({
+            "id": st.id, "room_id": st.room_id, "position_layout_m": list(st.position),
+            "heading_deg": st.heading_deg, "tilt_deg": list(st.tilt_deg),
+            "pose_true": {"R": R_true.tolist(), "t": t_true.tolist()},
+            "pose_written": {"R": np.asarray(R_w).tolist(), "t": np.asarray(t_w).tolist()},
+            "people": len(people), "rays": int(len(scan.valid)), "valid": scan.n_valid,
+            "mixed": int(scan.mixed.sum()), "virtual": int(scan.virtual.sum()),
+        })
+
+    names = [f"Station_{s.id + 1:03d}" for s in stations]
+    masks_written = write_e57(out / "scan.e57", scans, poses, names, cfg.effects.keep_invalid)
+    for scan, written in zip(scans, masks_written):
+        np.savez_compressed(
+            out / "labels" / f"scan_{scan.station_id:03d}.npz",
+            label=scan.label[written], instance=scan.instance[written],
+            virtual=scan.virtual[written], mixed=scan.mixed[written],
+            valid=scan.valid[written], row=scan.row[written], col=scan.col[written])
+
+    if ex.write_merged:
+        pts, inten = [], []
+        for scan, (R, t) in zip(scans, poses):
+            v = scan.valid
+            pts.append(scan.xyz_local[v] @ np.asarray(R).T + t)
+            inten.append(scan.intensity[v])
+        write_merged_e57(out / "scan_merged.e57", np.vstack(pts), np.concatenate(inten))
+
+    frame = frame_for(layout, ex.pixel_mm, ex.pad_m)
+    masks = build_masks(layout, solids, frame, ex.cut_height_m)
+    info = describe(layout, masks, frame, world, ex.cut_height_m)
+    info["stations"] = station_info
+    save_gt(out / "gt", masks, info)
+
+    doc = layout.to_dict()
+    doc["meta"].update({
+        "simscan_version": __version__, "seed": seed, "index": index,
+        "layout_to_world": world.to_dict(), "effects_sampled": params,
+        "scanner": {"nrow": sim.nrow, "ncol": sim.ncol,
+                    "angular_step_deg": cfg.scanner.angular_step_deg},
+        "config": config_to_dict(cfg),
+    })
+    doc["stations"] = station_info
+    (out / "layout.json").write_text(json.dumps(doc, indent=1, ensure_ascii=False), encoding="utf-8")
+
+    if ex.write_mesh:
+        mesh.save_ply(out / "mesh.ply")
+    summary = {"dir": str(out), "rooms": len(layout.rooms), "stations": len(stations),
+               "openings": len(layout.openings), "items": len(layout.items),
+               "points_valid": int(sum(s.n_valid for s in scans))}
+    if ex.preview:
+        summary.update(render_preview(out / "scan.e57", masks, frame, world, out / "preview.png"))
+    summary["seconds"] = round(time.perf_counter() - t_start, 2)
+    return summary
+
+
+def _job(args):
+    cfg, out, seed, index = args
+    try:
+        return generate_scene(cfg, out, seed, index)
+    except Exception as exc:  # одна плохая сцена не должна ронять весь набор
+        return {"dir": str(out), "error": f"{type(exc).__name__}: {exc}"}
+
+
+def generate_dataset(cfg: SynthConfig, out_root: str | Path, count: int, seed: int = 0,
+                     start: int = 0, workers: int = 1) -> list[dict]:
+    root = Path(out_root)
+    root.mkdir(parents=True, exist_ok=True)
+    jobs = [(cfg, root / f"scene_{i:05d}", seed, i) for i in range(start, start + count)]
+    if workers <= 1:
+        results = []
+        for j in jobs:
+            r = _job(j)
+            print(json.dumps(r, ensure_ascii=False), flush=True)
+            results.append(r)
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            results = []
+            for r in pool.map(_job, jobs):
+                print(json.dumps(r, ensure_ascii=False), flush=True)
+                results.append(r)
+    with open(root / "index.jsonl", "a", encoding="utf-8") as f:
+        for r in results:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return results
+
