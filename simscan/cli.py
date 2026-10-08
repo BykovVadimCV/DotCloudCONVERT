@@ -89,6 +89,10 @@ def main(argv: list[str] | None = None) -> None:
     ie.add_argument("--out", help="каталог отчёта (по умолчанию <файл>_report рядом с файлом)")
     ie.add_argument("--no-sample", action="store_true", help="без прореженного облака sample.npz")
     ie.add_argument("--chunk", type=int, default=2_000_000, help="точек за одно чтение")
+    fp = sub.add_parser("floorplan", help="план из сведённого облака: стены, окна, двери, помещения")
+    fp.add_argument("e57")
+    fp.add_argument("--out", help="каталог (по умолчанию <файл>_plan рядом с файлом)")
+    fp.add_argument("--px", type=float, default=0.01, help="размер пикселя растров, м")
     cm = sub.add_parser("compare-e57", help="сравнить отчёты inspect-e57 (реальный скан и синтетика)")
     cm.add_argument("reports", nargs="+", help="report.json")
     cm.add_argument("--names", nargs="+")
@@ -106,6 +110,16 @@ def main(argv: list[str] | None = None) -> None:
         kw = {"per_role": args.per_role, "seed": args.seed} if args.source == "gso" \
             else {"max_per_kind": args.per_role}
         print(fn(args.out, max_triangles=args.max_triangles, **kw))
+        return
+    if args.cmd == "floorplan":
+        from pathlib import Path
+
+        from .floorplan import floorplan
+
+        src = Path(args.e57)
+        out = Path(args.out) if args.out else src.with_name(src.stem + "_plan")
+        floorplan(src, out, px=args.px)
+        print(out)
         return
     if args.cmd == "compare-e57":
         from pathlib import Path
