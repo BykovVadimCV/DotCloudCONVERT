@@ -93,6 +93,11 @@ def main(argv: list[str] | None = None) -> None:
     fp.add_argument("e57")
     fp.add_argument("--out", help="каталог (по умолчанию <файл>_plan рядом с файлом)")
     fp.add_argument("--px", type=float, default=0.01, help="размер пикселя растров, м")
+    wh = sub.add_parser("wall-heatmap", help="тепловая карта стен: срезы по высоте с весами")
+    wh.add_argument("e57")
+    wh.add_argument("--out", help="каталог (по умолчанию <файл>_heat рядом с файлом)")
+    wh.add_argument("--px", type=float, default=0.01, help="размер пикселя, м")
+    wh.add_argument("--slice", type=float, default=0.1, help="толщина среза, м")
     cm = sub.add_parser("compare-e57", help="сравнить отчёты inspect-e57 (реальный скан и синтетика)")
     cm.add_argument("reports", nargs="+", help="report.json")
     cm.add_argument("--names", nargs="+")
@@ -119,6 +124,16 @@ def main(argv: list[str] | None = None) -> None:
         src = Path(args.e57)
         out = Path(args.out) if args.out else src.with_name(src.stem + "_plan")
         floorplan(src, out, px=args.px)
+        print(out)
+        return
+    if args.cmd == "wall-heatmap":
+        from pathlib import Path
+
+        from .wallheat import wall_heatmap
+
+        src = Path(args.e57)
+        out = Path(args.out) if args.out else src.with_name(src.stem + "_heat")
+        wall_heatmap(src, out, px=args.px, slice_m=args.slice)
         print(out)
         return
     if args.cmd == "compare-e57":

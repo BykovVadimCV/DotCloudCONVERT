@@ -67,6 +67,10 @@ def test_rooms_doors_windows_and_closed_contours(tmp_path):
     windows = [o for o in lv["openings"] if o["opening_type"] == "window"]
     assert len(doors) == 1 and abs(doors[0]["width"] - 0.9) < 0.12 and abs(doors[0]["head"] - 2.1) < 0.15
     assert len(windows) == 1 and abs(windows[0]["width"] - 1.4) < 0.15 and abs(windows[0]["sill"] - 0.9) < 0.15
-    # контуры замкнуты: у каждого узла не меньше двух стен
-    assert all(n["degree"] >= 2 for n in lv["nodes"]), lv["nodes"]
+    # перегородка - стена между двумя помещениями с толщиной между гранями
+    inner = [w for w in lv["walls"] if len(w["rooms"]) == 2]
+    assert inner and all(abs(w["thickness"] - 0.1) < 0.05 for w in inner), inner
+    # контур помещения - четыре прямые грани, без зубцов у окна
+    for r in lv["rooms"]:
+        assert all(f["kind"] == "line" for f in r["faces"]) and len(r["faces"]) <= 6, r["faces"]
     assert (tmp_path / "out" / "plan.png").exists() and (tmp_path / "out" / "walls.png").exists()
