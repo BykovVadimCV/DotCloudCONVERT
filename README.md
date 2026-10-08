@@ -18,6 +18,7 @@
   python -m simscan inspect-e57 путь/к/файлу.e57
   python -m simscan floorplan путь/к/файлу.e57 --out план   # план: стены, двери, окна, комнаты
   python -m simscan wall-heatmap путь/к/файлу.e57 --out heat  # тепловая карта стен по срезам
+  python -m simscan dataset real путь/к/файлу.e57 --out dataset # вход сети плана (8 каналов)
   python -m simscan wall-heatmap путь/к/файлу.e57 --out heat  # тепловая карта стен по срезам
   ```
 
@@ -302,3 +303,27 @@ scene_00042/
 ```bash
 python -m pytest -q
 ```
+
+## Датасет для сети плана
+
+```bash
+python -m simscan generate --count 100 --out out                                  # сцены
+python -m simscan dataset build out/scene_* --out dataset                        # вход + разметка
+python -m simscan dataset real D:/scans/kvartira.e57 --out dataset               # реальные, без разметки
+```
+
+Вход строится тем же растеризатором (`simscan/netinput.py`, `rasterize_e57`), что и для
+реальных E57: сцена -> симуляция сканера -> облако -> растр. Пиксель 2 см, мировая СК облака,
+`input.npy` float16 [8, H, W], нормировки фиксированы и записаны в `meta.json`:
+`occ_low/mid/high` (доля занятых срезов по 5 см в полосах 0,1-0,9 / 0,9-2,0 / 2,0 м - потолок),
+`floor_vis`, `ceil_vis`, `density`, `vert_frac`, `below_floor`. Уровни ищутся `detect_levels`
+с опорой на стоянки (грунт за окнами плотнее пола).
+
+Разметка: `sem.png` (0 снаружи, 1 помещение, 2 стена, 3 дверь, 4 окно, 5 проём во всю высоту,
+6 мебель и инженерия, 7 проём в перекрытии, 255 - кольцо в пиксель по границам классов;
+наружная стена - полоса 10 см от внутренней грани), `dist.npy` (до видимой грани, 0-30 см),
+`orient.npy` ((cos 2θ, sin 2θ) на стенах и проёмах), `heights.npy` (низ и верх проёма / высота
+потолка), `vector.json` (стены, проёмы, помещения в метрах), `scene.json`, `preview.png`
+(вход с контурами разметки - проверка совмещения). Разбиение train/val/test - по планировкам.
+Загрузчик: `simscan/torchdata.py` (кропы, отражения и повороты на 90° с пересчётом ориентации,
+выпадение каналов; повороты на произвольный угол и прореживание - на облаке).

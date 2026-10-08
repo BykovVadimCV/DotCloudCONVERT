@@ -93,6 +93,17 @@ def main(argv: list[str] | None = None) -> None:
     fp.add_argument("e57")
     fp.add_argument("--out", help="каталог (по умолчанию <файл>_plan рядом с файлом)")
     fp.add_argument("--px", type=float, default=0.01, help="размер пикселя растров, м")
+    ds = sub.add_parser("dataset", help="датасет для сети плана: вход 8 каналов + разметка")
+    ds.add_argument("action", choices=["build", "real"], help="build - сцены генератора, real - реальные E57")
+    ds.add_argument("paths", nargs="+", help="каталоги сцен (build) или файлы E57 (real)")
+    ds.add_argument("--out", required=True, help="корень датасета")
+    ds.add_argument("--id", help="real: имя объекта (по умолчанию имя файла)")
+    ds.add_argument("--px", type=float, default=0.02, help="пиксель, м")
+    ds.add_argument("--gt-levels", action="store_true", help="build: уровни из эталона, а не detect_levels")
+    cp = sub.add_parser("cellplan", help="план: разбиение на ячейки по кандидатам стен и глобальная разметка")
+    cp.add_argument("e57")
+    cp.add_argument("--out", help="каталог (по умолчанию <файл>_cellplan рядом с файлом)")
+    cp.add_argument("--px", type=float, default=0.01, help="размер пикселя, м")
     wh = sub.add_parser("wall-heatmap", help="тепловая карта стен: срезы по высоте с весами")
     wh.add_argument("e57")
     wh.add_argument("--out", help="каталог (по умолчанию <файл>_heat рядом с файлом)")
@@ -126,6 +137,25 @@ def main(argv: list[str] | None = None) -> None:
         src = Path(args.e57)
         out = Path(args.out) if args.out else src.with_name(src.stem + "_plan")
         floorplan(src, out, px=args.px)
+        print(out)
+        return
+    if args.cmd == "dataset":
+        from .netinput import build_real, build_scene
+
+        for p in args.paths:
+            if args.action == "build":
+                print("\n".join(build_scene(p, args.out, px=args.px, use_gt_levels=args.gt_levels)))
+            else:
+                print("\n".join(build_real(p, args.out, object_id=args.id, px=args.px)))
+        return
+    if args.cmd == "cellplan":
+        from pathlib import Path
+
+        from .cellplan import cellplan
+
+        src = Path(args.e57)
+        out = Path(args.out) if args.out else src.with_name(src.stem + "_cellplan")
+        cellplan(src, out, px=args.px)
         print(out)
         return
     if args.cmd == "wall-heatmap":

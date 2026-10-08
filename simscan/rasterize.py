@@ -199,7 +199,7 @@ def floor_ceiling(z: np.ndarray) -> tuple[float | None, float | None]:
 
 
 def detect_levels(points: np.ndarray, min_share: float = 0.15, min_height: float = 2.0,
-                  max_height: float = 4.5) -> list[dict]:
+                  max_height: float = 4.5, stations_z=None) -> list[dict]:
     """Уровни сведённого облака: пары (пол, потолок) из горизонтальных плоскостей.
 
     Плоскость - пик гистограммы z (шаг 2 см), площадь - по ячейкам 25 см. Берутся пики
@@ -222,6 +222,25 @@ def detect_levels(points: np.ndarray, min_share: float = 0.15, min_height: float
         planes.append({"z": float(c[i]), "area": len(cells) * 0.0625, "n": int(h[i])})
     if not planes:
         return []
+    if stations_z is not None and len(stations_z):
+        # опора на стоянки: пол - самая плотная плоскость на 0,6-1,9 м ниже стоянки (грунт за
+        # окнами бывает плотнее пола и иначе отсеивает его), потолок - самая плотная выше пола
+        levels = []
+        for sz in sorted(stations_z):
+            fls = [p for p in planes if 0.6 <= sz - p["z"] <= 1.9]
+            if not fls:
+                continue
+            fl = max(fls, key=lambda q: q["n"])
+            ces = [q for q in planes if min_height <= q["z"] - fl["z"] <= max_height and q["z"] > sz]
+            if not ces:
+                continue
+            ce = max(ces, key=lambda q: q["n"])
+            if any(abs(lv["floor_z"] - fl["z"]) < 0.3 for lv in levels):
+                continue
+            levels.append({"floor_z": round(fl["z"], 3), "ceiling_z": round(ce["z"], 3),
+                           "height_m": round(ce["z"] - fl["z"], 3), "floor_area_m2": round(fl["area"], 1)})
+        if levels:
+            return sorted(levels, key=lambda lv: lv["floor_z"])
     # отбор по числу точек, не по площади: земля за окнами занимает большую площадь,
     # но точек на ней мало (далеко и под острым углом)
     top = max(p["n"] for p in planes)

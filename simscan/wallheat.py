@@ -81,7 +81,9 @@ def slice_counts(path, px: float = 0.01, slice_m: float = 0.1, margin_m: float =
         edges = np.arange(margin_m, top - margin_m + 1e-9, slice_m)
         out.append({"level": lv, "z0": edges[:-1], "slice_m": slice_m,
                     "counts": np.zeros((len(edges) - 1, H, W), np.uint8),
-                    "free": np.zeros((H, W), bool)})          # виден пол или потолок
+                    "free": np.zeros((H, W), bool),           # виден пол или потолок
+                    "floor": np.zeros((H, W), bool), "ceil": np.zeros((H, W), bool),
+                    "points": np.zeros((H, W), np.int32)})     # всего точек в срезах
     with E57Reader(path) as r:
         for i in range(len(r.scans)):
             for p in _scan_points(r, i, chunk):
@@ -95,8 +97,11 @@ def slice_counts(path, px: float = 0.01, slice_m: float = 0.1, margin_m: float =
                         continue
                     h = p[:, 2] - L["level"]["floor_z"]
                     top = L["level"]["ceiling_z"] - L["level"]["floor_z"]
-                    fm = ok & ((np.abs(h) < 0.04) | (np.abs(h - top) < 0.04))
-                    L["free"].reshape(-1)[flat[fm]] = True
+                    fl = ok & (np.abs(h) < 0.04)
+                    ce = ok & (np.abs(h - top) < 0.04)
+                    L["floor"].reshape(-1)[flat[fl]] = True
+                    L["ceil"].reshape(-1)[flat[ce]] = True
+                    L["free"].reshape(-1)[flat[fl | ce]] = True
                     k = np.floor((h - L["z0"][0]) / slice_m).astype(np.int64)
                     m = ok & (k >= 0) & (k < len(L["z0"]))
                     if not m.any():
@@ -105,7 +110,18 @@ def slice_counts(path, px: float = 0.01, slice_m: float = 0.1, margin_m: float =
                     u, cnt = np.unique(key, return_counts=True)
                     c = L["counts"].reshape(-1)
                     c[u] = np.minimum(c[u].astype(np.int32) + cnt, 255).astype(np.uint8)
+                    L["points"].reshape(-1)[:] += np.bincount(flat[m], minlength=H * W).astype(np.int32)
     return out, {"rotation_deg": angle, "origin": lo.tolist(), "px": px, "shape": [H, W]}
+
+
+def to_raster(xy: np.ndarray, frame: dict) -> np.ndarray:
+    """Точки файла (x, y) -> пиксели растра (j, i) в кадре slice_counts."""
+    a = math.radians(-frame["rotation_deg"])
+    rot = np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
+    q = np.atleast_2d(xy)[:, :2] @ rot.T
+    j = (q[:, 0] - frame["origin"][0]) / frame["px"]
+    i = frame["shape"][0] - 1 - (q[:, 1] - frame["origin"][1]) / frame["px"]
+    return np.c_[j, i]
 
 
 DEFAULT_PRIOR = "0:1,0.8:1,1.0:0.1,2.0:0.1,2.2:0.6,9:0.6"
@@ -156,35 +172,42 @@ def slice_weights(occ: np.ndarray, prior: np.ndarray | None = None, iters: int =
     return w, heat, {"precision": prec, "recall": rec, "f1": f1, "prior": prior}
 
 
-def wall_heatmap(path, out_dir, px: float = 0.01, slice_m: float = 0.1, prior: str = DEFAULT_PRIOR,
-                 log=print) -> dict:
+def analyse_slices(L: dict, px: float, prior: str = DEFAULT_PRIOR) -> dict:
+    """Срезы уровня -> веса, карта, доли по полосам (низ < 0,9 м, верх >= 2 м) и разметка."""
     import cv2
 
+    occ = L["counts"] > 0
+    zc = L["z0"] + L["slice_m"] / 2
+    w, heat, info = slice_weights(occ, height_prior(zc, prior))
+    # для разметки - с допуском в пиксель: грань дрожит между соседними пикселями от среза
+    # к срезу, и на редком облаке стена иначе рвётся
+    k3 = np.ones((3, 3), np.uint8)
+    bands = {"all": np.ones(len(w), bool), "low": zc < 0.9, "top": zc >= 2.0}
+    acc = {b: np.zeros(heat.shape, np.float32) for b in bands}
+    for k, (wk, o) in enumerate(zip(w, occ)):
+        d = cv2.dilate(o.view(np.uint8), k3).astype(np.float32) * np.float32(wk)
+        for b, m in bands.items():
+            if m[k]:
+                acc[b] += d
+    for b, m in bands.items():
+        acc[b] /= max(float(w[m].sum()), 1e-9)
+    lab, linfo = label_heatmap(acc["all"], px, low=acc["low"], top=acc["top"], free=L["free"])
+    return {"occ": occ, "zc": zc, "w": w, "heat": heat, "info": info, "bands": acc, "lab": lab, "linfo": linfo}
+
+
+def wall_heatmap(path, out_dir, px: float = 0.01, slice_m: float = 0.1, prior: str = DEFAULT_PRIOR,
+                 log=print) -> dict:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     data, frame = slice_counts(path, px=px, slice_m=slice_m, log=log)
     result = {"file": Path(path).name, **frame, "prior": prior, "levels": []}
     for li, L in enumerate(data, 1):
-        occ = L["counts"] > 0
-        w, heat, info = slice_weights(occ, height_prior(L["z0"] + L["slice_m"] / 2, prior))
+        A = analyse_slices(L, frame["px"], prior)
+        occ, w, heat, info, lab, linfo = A["occ"], A["w"], A["heat"], A["info"], A["lab"], A["linfo"]
         sfx = "" if len(data) == 1 else f"_L{li}"
         np.save(out / f"heat{sfx}.npy", heat.astype(np.float16))
         _plot_heat(heat, L, w, info, frame["px"], out / f"heat{sfx}.png")
         _plot_slices(occ, L, w, out / f"slices{sfx}.png")
-        # для разметки - с допуском в пиксель: грань дрожит между соседними пикселями от среза
-        # к срезу, и на редком облаке стена иначе рвётся
-        k3 = np.ones((3, 3), np.uint8)
-        zc = L["z0"] + L["slice_m"] / 2
-        bands = {"all": np.ones(len(w), bool), "low": zc < 0.9, "top": zc >= 2.0}
-        acc = {b: np.zeros(heat.shape, np.float32) for b in bands}
-        for k, (wk, o) in enumerate(zip(w, occ)):
-            d = cv2.dilate(o.view(np.uint8), k3).astype(np.float32) * np.float32(wk)
-            for b, m in bands.items():
-                if m[k]:
-                    acc[b] += d
-        for b, m in bands.items():
-            acc[b] /= max(float(w[m].sum()), 1e-9)
-        lab, linfo = label_heatmap(acc["all"], frame["px"], low=acc["low"], top=acc["top"], free=L["free"])
         np.save(out / f"labels{sfx}.npy", lab)
         _plot_labels(lab, linfo, frame["px"], out / f"labels{sfx}.png")
         _save_full(heat, lab, out / f"heat_full{sfx}.png", out / f"labels_full{sfx}.png")
