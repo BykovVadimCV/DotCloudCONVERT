@@ -221,3 +221,83 @@ def calib_real(paths, out_dir, log=print) -> Path:
     z = shutil.make_archive(str(out), "zip", root_dir=out)
     log(f"архив: {z} ({Path(z).stat().st_size / 1e6:.1f} МБ)")
     return Path(z)
+
+
+# ----------------------------------------------------------------------
+# Сравнение отчётов (реальные против синтетики)
+# ----------------------------------------------------------------------
+
+def _level_metrics(st: dict) -> dict:
+    """Числа уровня, которые сравниваются между реальным и синтетикой (на м² пола - чтобы
+    квартиры разного размера были сравнимы)."""
+    out = {}
+    for band, (a, b) in {"низ": (0, 0.9), "середина": (0.9, 2.0), "верх": (2.0, 99)}.items():
+        s = [x for x in st["slices"] if a <= x["z"] < b]
+        for k in ("f1", "precision", "recall"):
+            out[f"{k} {band}"] = float(np.mean([x[k] for x in s])) if s else np.nan
+    areas = st["label_areas_m2"]
+    wall = max(areas.get("стена", 0), 1e-6)
+    out["шум / стены (площадь)"] = areas.get("шум", 0) / wall
+    out["доля шума в размеченном"] = st["noise_share_of_labelled"]
+    out["толщина линии стены, см"] = (st["wall_line_width_m"] or np.nan) * 100
+    wall_len = wall / max(st["wall_line_width_m"] or 0.035, 1e-3)          # м линий стен
+    out["полос шума на 10 м стен"] = st["streaks_in_rooms"]["count"] / max(wall_len / 10, 1e-6)
+    out["длина полос на 10 м стен, м"] = st["streaks_in_rooms"]["total_m"] / max(wall_len / 10, 1e-6)
+    out["шум на 10 м стен, м²"] = areas.get("шум", 0) / max(wall_len / 10, 1e-6)
+    out["окон: глубина зоны, м"] = float(np.mean([w["depth_m"] for w in st["windows"]])) if st["windows"] else np.nan
+    ic = st.get("input_channels", {})
+    for reg, nm in (("faces", "грани"), ("other_occupied", "прочее занятое")):
+        if reg in ic and "occ_low" in ic[reg]:
+            out[f"{nm}: доля пикселей"] = ic[reg]["share"]
+            out[f"{nm}: occ_low (ср.)"] = ic[reg]["occ_low"][3]
+            out[f"{nm}: occ_high (ср.)"] = ic[reg]["occ_high"][3]
+            out[f"{nm}: density (медиана)"] = ic[reg]["density"][1]
+            out[f"{nm}: vert_frac (ср.)"] = ic[reg]["vert_frac"][3]
+    out["пол неровен, мм"] = st.get("low_slice", {}).get("floor_cells_sd_mm", np.nan)
+    out["точек в срезе 3-8 см на м стен"] = st.get("low_slice", {}).get("points", 0) / max(wall_len, 1e-6)
+    return out
+
+
+def compare_calib(groups: dict, out_png=None) -> dict:
+    """groups: {"реальные": [каталоги отчётов], "синтетика": [...]} -> {группа: {метрика: (ср, мин, макс)}}."""
+    res = {}
+    for g, roots in groups.items():
+        rows = []
+        for r in roots:
+            for f in sorted(Path(r).rglob("L*/stats.json")):
+                rows.append(_level_metrics(json.loads(f.read_text(encoding="utf-8"))))
+        keys = rows[0].keys() if rows else []
+        res[g] = {k: (float(np.nanmean([x.get(k, np.nan) for x in rows])),
+                      float(np.nanmin([x.get(k, np.nan) for x in rows])),
+                      float(np.nanmax([x.get(k, np.nan) for x in rows]))) for k in keys}
+        res[g]["_n"] = len(rows)
+    if out_png is not None:
+        from .debug import INK, _plt
+
+        plt = _plt()
+        names = list(groups)
+        keys = [k for k in res[names[0]] if not k.startswith("_")]
+        fig, ax = plt.subplots(figsize=(11, 0.42 * len(keys) + 1))
+        y = np.arange(len(keys))
+        colors = ["#2a6fb0", "#e0702b", "#3a9a5b"]
+        for gi, g in enumerate(names):
+            ref = np.array([max(abs(res[names[0]][k][0]), 1e-9) for k in keys])
+            m = np.array([res[g][k][0] for k in keys]) / ref
+            lo = np.array([res[g][k][1] for k in keys]) / ref
+            hi = np.array([res[g][k][2] for k in keys]) / ref
+            yy = y + (gi - (len(names) - 1) / 2) * 0.25
+            ax.errorbar(m, yy, xerr=[m - lo, hi - m], fmt="o", color=colors[gi % 3], label=f"{g} (уровней {res[g]['_n']})",
+                        capsize=2, ms=5)
+        ax.axvline(1, color="#999", lw=0.8)
+        ax.set_yticks(y)
+        ax.set_yticklabels(keys, fontsize=8)
+        ax.invert_yaxis()
+        ax.set_xscale("log")
+        ax.set_xlabel(f"отношение к «{names[0]}» (1 - совпадает; разброс - мин..макс по уровням)", fontsize=8)
+        ax.set_title("Сверка синтетики с реальными объектами одной меркой (calib-real)", loc="left", fontsize=10,
+                     color=INK)
+        ax.legend(fontsize=8, frameon=False, loc="lower right")
+        fig.tight_layout()
+        fig.savefig(out_png, dpi=110)
+        plt.close(fig)
+    return res

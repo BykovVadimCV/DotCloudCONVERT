@@ -4,7 +4,7 @@ import zipfile
 
 import numpy as np
 
-from simscan.calib_real import calib_real
+from simscan.calib_real import calib_real, compare_calib
 from simscan.e57io import write_merged_e57
 
 from test_floorplan import _apartment
@@ -28,3 +28,6 @@ def test_calib_real_zip(tmp_path):
     st = json.loads((d / "stats.json").read_text(encoding="utf-8"))
     assert st["slices"] and 0 <= st["noise_share_of_labelled"] <= 1 and st["wall_line_width_m"] > 0
     assert "input_channels" in st and "low_slice" in st
+    res = compare_calib({"a": [tmp_path / "calib"], "b": [tmp_path / "calib"]}, tmp_path / "cmp.png")
+    assert res["a"]["_n"] == 1 and (tmp_path / "cmp.png").exists()
+    assert res["a"]["f1 низ"][0] == res["b"]["f1 низ"][0]

@@ -107,6 +107,10 @@ def main(argv: list[str] | None = None) -> None:
     cr = sub.add_parser("calib-real", help="всё для подгонки генератора из E57 в один zip")
     cr.add_argument("e57", nargs="+", help="файлы E57 (реальные или scan.e57 сцен)")
     cr.add_argument("--out", required=True, help="каталог отчёта; рядом пишется <каталог>.zip")
+    cc = sub.add_parser("calib-compare", help="сверка отчётов calib-real: реальные против синтетики")
+    cc.add_argument("--real", nargs="+", required=True, help="каталоги отчётов calib-real реальных объектов")
+    cc.add_argument("--syn", nargs="+", required=True, help="каталоги отчётов calib-real синтетики")
+    cc.add_argument("--out", default="calib_compare.png", help="рисунок сверки")
     sm = sub.add_parser("slice-map", help="тонкий срез у пола (под радиаторами) от местного пола")
     sm.add_argument("e57")
     sm.add_argument("--out", help="каталог (по умолчанию <файл>_slice рядом с файлом)")
@@ -171,6 +175,16 @@ def main(argv: list[str] | None = None) -> None:
         from .calib_real import calib_real
 
         print(calib_real(args.e57, args.out))
+        return
+    if args.cmd == "calib-compare":
+        from .calib_real import compare_calib
+
+        res = compare_calib({"реальные": args.real, "синтетика": args.syn}, args.out)
+        r, y = res["реальные"], res["синтетика"]
+        for k in r:
+            if not k.startswith("_"):
+                print(f"{k:34s} {r[k][0]:9.3f} {y[k][0]:9.3f}  x{y[k][0] / r[k][0] if r[k][0] else float('nan'):.2f}")
+        print(args.out)
         return
     if args.cmd == "slice-map":
         from pathlib import Path
