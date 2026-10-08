@@ -122,11 +122,14 @@ def torch_dataset(root, split: str = "train", **kw):
     base = FloorplanSamples(root, split, **kw)
 
     class _DS(Dataset):
+        def __init__(self):
+            self.base = base               # для worker_init_fn: своя случайность в каждом процессе
+
         def __len__(self):
-            return len(base)
+            return len(self.base)
 
         def __getitem__(self, i):
-            s = base[i]
+            s = self.base[i]
             return {k: (torch.from_numpy(np.ascontiguousarray(v)) if isinstance(v, np.ndarray) else v)
                     for k, v in s.items()}
 

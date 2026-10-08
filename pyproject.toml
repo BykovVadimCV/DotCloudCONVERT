@@ -21,6 +21,7 @@ dependencies = [
 dev = ["pytest>=8.0"]
 datasetgen = ["shapely>=2.0", "networkx>=3.0", "pydantic>=2.0"]
 debug = ["matplotlib>=3.8"]
+train = ["torch>=2.2"]
 
 [project.scripts]
 simscan = "simscan.cli:main"

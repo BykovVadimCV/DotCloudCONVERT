@@ -75,6 +75,22 @@ def main(argv: list[str] | None = None) -> None:
     md.add_argument("--keep-scans", action="store_true", help="не удалять сцены генератора")
     md.add_argument("--config")
     md.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    tr = sub.add_parser("train", help="обучить сеть плана на датасете (нужен torch)")
+    tr.add_argument("--data", required=True, help="корень датасета")
+    tr.add_argument("--out", required=True, help="каталог прогона: last.pt, best.pt, history.jsonl")
+    tr.add_argument("--epochs", type=int, default=60)
+    tr.add_argument("--batch", type=int, default=8)
+    tr.add_argument("--crop", type=int, default=512)
+    tr.add_argument("--lr", type=float, default=1e-3)
+    tr.add_argument("--workers", type=int, default=2)
+    tr.add_argument("--resume", action="store_true", help="продолжить с last.pt в --out")
+    tr.add_argument("--seed", type=int, default=0)
+    tr.add_argument("--max-steps", type=int, help="остановиться после стольких шагов (проверка)")
+    inf = sub.add_parser("infer", help="применить сеть плана к E57 или к каталогам с input.npy")
+    inf.add_argument("ckpt", help="best.pt")
+    inf.add_argument("paths", nargs="+")
+    inf.add_argument("--out", required=True)
+    inf.add_argument("--tile", type=int, default=512)
     d = sub.add_parser("dump-config", help="напечатать конфигурацию по умолчанию (YAML)")
     d.add_argument("--config")
     pl = sub.add_parser("plans", help="только планировки + рендер (без сканирования)")
@@ -163,6 +179,17 @@ def main(argv: list[str] | None = None) -> None:
         out = Path(args.out) if args.out else src.with_name(src.stem + "_plan")
         floorplan(src, out, px=args.px)
         print(out)
+        return
+    if args.cmd == "train":
+        from .train import train
+
+        print(train(args.data, args.out, epochs=args.epochs, batch=args.batch, crop=args.crop, lr=args.lr,
+                    workers=args.workers, resume=args.resume, seed=args.seed, max_steps=args.max_steps))
+        return
+    if args.cmd == "infer":
+        from .infer import infer
+
+        infer(args.ckpt, args.paths, args.out, tile=args.tile)
         return
     if args.cmd == "make-dataset":
         from .config import load_config

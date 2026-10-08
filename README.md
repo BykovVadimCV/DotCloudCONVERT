@@ -330,3 +330,25 @@ python -m simscan dataset real D:/scans/kvartira.e57 --out dataset              
 (вход с контурами разметки - проверка совмещения). Разбиение train/val/test - по планировкам.
 Загрузчик: `simscan/torchdata.py` (кропы, отражения и повороты на 90° с пересчётом ориентации,
 выпадение каналов; повороты на произвольный угол и прореживание - на облаке).
+
+### Массовая сборка, обучение, применение
+
+```bash
+# на машине с ядрами: сцена -> растр -> скан удаляется (~5 МБ на уровень вместо ~0,5 ГБ)
+python -m simscan make-dataset --config configs/customer_like.yaml --count 3000 --workers 16 --out dataset
+python -m simscan dataset pack dataset --out dataset.zip         # один архив для Google Drive
+# несколько машин: одинаковый --seed, разные --start; потом слить scenes/ и
+python -m simscan dataset splits dataset
+
+# обучение (нужен torch; на Colab - notebooks/colab_train.ipynb)
+python -m simscan train --data dataset --out runs/r1 --epochs 60 --batch 8 [--resume]
+# применение к реальному E57 или к каталогам с input.npy
+python -m simscan infer runs/r1/best.pt kvartira.e57 --out pred
+```
+
+`make-dataset` продолжает с места обрыва. `configs/customer_like.yaml` - 60% квартир под отделку
+(`interior.p_bare`: только сантехника и патроны на проводе, как у заказчика) и 40% с мебелью.
+Сеть (`simscan/net.py`) - U-Net на ResNet-34 на чистом torch, головы: классы (CE + Dice + clDice
+по стенам и проёмам), расстояние (L1), ориентация (1 - cos), высоты проёмов (L1). `best.pt` -
+по mIoU стены, двери, окна и проёма на val. `infer` пишет на уровень `sem.png`, `prob.npz`,
+`dist/orient/heights.npy`, `scene.json` (пиксель -> мир) и `pred.png`.
