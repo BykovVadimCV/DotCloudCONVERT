@@ -30,4 +30,10 @@ def test_noisy_slices_get_lower_weight(tmp_path):
     heat = np.load(tmp_path / "out" / "heat.npy").astype(float)
     assert heat.max() > 0.9                                   # стена во всю высоту
     assert (heat > 0.5).mean() < 0.1                          # стол и светильник не стали стенами
-    assert (tmp_path / "out" / "heat.png").exists() and (tmp_path / "out" / "slices.png").exists()
+    for f in ("heat.png", "slices.png", "labels.png", "heat_full.png", "labels_full.png", "labels.npy"):
+        assert (tmp_path / "out" / f).exists(), f
+    # разметка: дверь в перегородке - по перемычке (только верхние срезы), ширина 0,9 м
+    doors = res["levels"][0]["doors"]
+    assert len(doors) == 1 and abs(doors[0]["width"] - 0.9) < 0.12, doors
+    lab = np.load(tmp_path / "out" / "labels.npy")
+    assert (lab == 1).sum() * 0.02 ** 2 > 0.3                  # стены размечены

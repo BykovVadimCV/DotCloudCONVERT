@@ -1,7 +1,12 @@
 """Тепловая карта стен: наложение горизонтальных срезов облака с весами.
 
     python -m simscan wall-heatmap D:/scans/kvartira.e57 --out D:/heat
-    -> heat.png (на уровень - heat_L1.png ...), slices.png, heat.npy, weights.json
+    -> heat.png (на уровень - heat_L1.png ...), slices.png, labels.png (стена / дверь / окно /
+       шум), heat_full.png и labels_full.png (полное разрешение: пиксель = пиксель растра),
+       heat.npy, labels.npy (0 пусто, 1 стена, 2 дверь, 3 окно, 4 шум), weights.json
+
+Разрешение - --px (по умолчанию 1 см). Предел - шаг точек: у BLK360 после Cyclone ~4 мм, так
+что 5 мм ещё имеет смысл; мельче - пиксели стены начинают пустеть.
 
 Срез - точки в слое высоты (по умолчанию 10 см) над полом уровня, растр занятости. Стена
 вертикальна: она есть почти во всех срезах на одном и том же месте. Шум и бред - нет: мебель
@@ -56,7 +61,7 @@ def _frame(path, px: float, chunk: int, sample_points: int, log):
     q = sample[:, :2] @ rot.T
     lo = np.percentile(q, 0.2, axis=0) - 0.5
     hi = np.percentile(q, 99.8, axis=0) + 0.5
-    px = max(px, float((hi - lo).max()) / 3000)
+    px = max(px, float((hi - lo).max()) / 8000)
     shape = (int(math.ceil((hi[1] - lo[1]) / px)), int(math.ceil((hi[0] - lo[0]) / px)))
     log(f"уровней {len(levels)}, поворот {angle:.2f}°, растр {shape[1]}x{shape[0]} по {px * 1000:.0f} мм")
     return levels, angle, rot, lo, px, shape
@@ -75,7 +80,8 @@ def slice_counts(path, px: float = 0.01, slice_m: float = 0.1, margin_m: float =
         top = lv["ceiling_z"] - lv["floor_z"]
         edges = np.arange(margin_m, top - margin_m + 1e-9, slice_m)
         out.append({"level": lv, "z0": edges[:-1], "slice_m": slice_m,
-                    "counts": np.zeros((len(edges) - 1, H, W), np.uint8)})
+                    "counts": np.zeros((len(edges) - 1, H, W), np.uint8),
+                    "free": np.zeros((H, W), bool)})          # виден пол или потолок
     with E57Reader(path) as r:
         for i in range(len(r.scans)):
             for p in _scan_points(r, i, chunk):
@@ -88,6 +94,9 @@ def slice_counts(path, px: float = 0.01, slice_m: float = 0.1, margin_m: float =
                     if not len(L["z0"]):
                         continue
                     h = p[:, 2] - L["level"]["floor_z"]
+                    top = L["level"]["ceiling_z"] - L["level"]["floor_z"]
+                    fm = ok & ((np.abs(h) < 0.04) | (np.abs(h - top) < 0.04))
+                    L["free"].reshape(-1)[flat[fm]] = True
                     k = np.floor((h - L["z0"][0]) / slice_m).astype(np.int64)
                     m = ok & (k >= 0) & (k < len(L["z0"]))
                     if not m.any():
@@ -110,6 +119,15 @@ def height_prior(z: np.ndarray, spec: str = DEFAULT_PRIOR) -> np.ndarray:
     return np.interp(z, [p[0] for p in pts], [p[1] for p in pts])
 
 
+def _wsum(w, occ) -> np.ndarray:
+    """Сумма срезов с весами без копии всего стека во float (на 5 мм стек - сотни МБ)."""
+    out = np.zeros(occ.shape[1:], np.float32)
+    for wk, o in zip(w, occ):
+        if wk:
+            out += np.float32(wk) * o
+    return out
+
+
 def slice_weights(occ: np.ndarray, prior: np.ndarray | None = None, iters: int = 3, tol_px: int = 1,
                   min_slices: int = 4) -> tuple[np.ndarray, np.ndarray, dict]:
     """occ (срез, H, W) bool -> (веса срезов, карта, разбор: точность, полнота)."""
@@ -117,11 +135,11 @@ def slice_weights(occ: np.ndarray, prior: np.ndarray | None = None, iters: int =
 
     n = len(occ)
     k = np.ones((2 * tol_px + 1, 2 * tol_px + 1), np.uint8)
-    dil = np.stack([cv2.dilate(o.astype(np.uint8), k) for o in occ]).astype(bool)
+    dil = np.stack([cv2.dilate(o.view(np.uint8), k).view(bool) for o in occ])
     prior = np.ones(n) if prior is None else np.asarray(prior, float)
     w = prior.copy()
     f1 = np.ones(n)
-    support = np.tensordot(w, occ.astype(np.float32), 1)   # во скольких срезах занят (с весами)
+    support = _wsum(w, occ)                          # во скольких срезах занят (с весами)
     prec = rec = np.zeros(n)
     for _ in range(iters):
         # структура - занято хотя бы в min_slices срезах (40 см по высоте), а не в половине:
@@ -133,13 +151,15 @@ def slice_weights(occ: np.ndarray, prior: np.ndarray | None = None, iters: int =
         rec = np.array([(ref & d).sum() / nr for d in dil])
         f1 = np.where(prec + rec > 0, 2 * prec * rec / np.maximum(prec + rec, 1e-9), 0.0)
         w = prior * f1                               # вес = высота (априори) x качество среза
-        support = np.tensordot(w, occ.astype(np.float32), 1)
+        support = _wsum(w, occ)
     heat = support / max(w.sum(), 1e-9)
     return w, heat, {"precision": prec, "recall": rec, "f1": f1, "prior": prior}
 
 
 def wall_heatmap(path, out_dir, px: float = 0.01, slice_m: float = 0.1, prior: str = DEFAULT_PRIOR,
                  log=print) -> dict:
+    import cv2
+
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     data, frame = slice_counts(path, px=px, slice_m=slice_m, log=log)
@@ -151,13 +171,39 @@ def wall_heatmap(path, out_dir, px: float = 0.01, slice_m: float = 0.1, prior: s
         np.save(out / f"heat{sfx}.npy", heat.astype(np.float16))
         _plot_heat(heat, L, w, info, frame["px"], out / f"heat{sfx}.png")
         _plot_slices(occ, L, w, out / f"slices{sfx}.png")
+        # для разметки - с допуском в пиксель: грань дрожит между соседними пикселями от среза
+        # к срезу, и на редком облаке стена иначе рвётся
+        k3 = np.ones((3, 3), np.uint8)
+        zc = L["z0"] + L["slice_m"] / 2
+        bands = {"all": np.ones(len(w), bool), "low": zc < 0.9, "top": zc >= 2.0}
+        acc = {b: np.zeros(heat.shape, np.float32) for b in bands}
+        for k, (wk, o) in enumerate(zip(w, occ)):
+            d = cv2.dilate(o.view(np.uint8), k3).astype(np.float32) * np.float32(wk)
+            for b, m in bands.items():
+                if m[k]:
+                    acc[b] += d
+        for b, m in bands.items():
+            acc[b] /= max(float(w[m].sum()), 1e-9)
+        lab, linfo = label_heatmap(acc["all"], frame["px"], low=acc["low"], top=acc["top"], free=L["free"])
+        np.save(out / f"labels{sfx}.npy", lab)
+        _plot_labels(lab, linfo, frame["px"], out / f"labels{sfx}.png")
+        _save_full(heat, lab, out / f"heat_full{sfx}.png", out / f"labels_full{sfx}.png")
+        H_ = heat.shape[0]
+        to_m = lambda q: [round(frame["origin"][0] + float(q[0]) * frame["px"], 3),          # noqa: E731
+                          round(frame["origin"][1] + (H_ - 1 - float(q[1])) * frame["px"], 3)]
         result["levels"].append({
             "floor_z": round(L["level"]["floor_z"], 3), "ceiling_z": round(L["level"]["ceiling_z"], 3),
             "slices": [{"z": round(float(z), 2), "weight": round(float(a), 3), "prior": round(float(pr), 3),
                         "f1": round(float(f), 3), "precision": round(float(p), 3), "recall": round(float(r), 3)}
                        for z, a, pr, f, p, r in zip(L["z0"], w, info["prior"], info["f1"], info["precision"],
-                                                    info["recall"])]})
-        log(f"уровень {li}: срезов {len(w)}, вес > 0,5 у {int((w > 0.5).sum())}")
+                                                    info["recall"])],
+            "doors": [{"a": to_m(d["a"]), "b": to_m(d["b"]), "width": round(d["width_px"] * frame["px"], 3)}
+                      for d in linfo["doors"]],
+            "windows": [{"a": to_m(d["a"]), "b": to_m(d["b"]), "width": round(d["width_px"] * frame["px"], 3),
+                         "depth": round(d["depth_px"] * frame["px"], 3)} for d in linfo["windows"]],
+            "labels": {LABEL_NAMES[k]: round(float((lab == k).sum()) * frame["px"] ** 2, 3)
+                       for k in (WALL, DOOR, WINDOW, NOISE)}})
+        log(f"уровень {li}: срезов {len(w)}, дверей {len(linfo['doors'])}, окон {len(linfo['windows'])}")
     (out / "weights.json").write_text(json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")
     return result
 
@@ -171,6 +217,18 @@ def _crop(heat: np.ndarray, pad: int = 20):
     return (slice(max(0, ys.min() - pad), ys.max() + pad), slice(max(0, xs.min() - pad), xs.max() + pad))
 
 
+def _pool(a: np.ndarray, max_px: int = 1800, rank: np.ndarray | None = None) -> np.ndarray:
+    """Уменьшение для рисунка максимумом по блоку: линия в пиксель не пропадает. rank -
+    порядок важности меток (больше - важнее) для карты меток."""
+    f = int(math.ceil(max(a.shape) / max_px))
+    if f <= 1:
+        return a
+    H, W = a.shape
+    pad = np.pad(a if rank is None else rank[a], ((0, -H % f), (0, -W % f)))
+    m = pad.reshape(pad.shape[0] // f, f, pad.shape[1] // f, f).max(axis=(1, 3))
+    return m if rank is None else np.argsort(rank)[m]
+
+
 def _plot_heat(heat, L, w, info, px, path):
     from .debug import INK, INK2, ORANGE, _plt
 
@@ -180,7 +238,8 @@ def _plot_heat(heat, L, w, info, px, path):
     H, W = h.shape
     fig = plt.figure(figsize=(12 * W / max(H, W) + 3.6, 12 * H / max(H, W) + 0.6))
     ax = fig.add_axes([0.01, 0.03, 0.74, 0.92])
-    im = ax.imshow(h, cmap="magma_r", vmin=0, vmax=1, interpolation="nearest")
+    im = ax.imshow(_pool(h), cmap="magma_r", vmin=0, vmax=1, interpolation="nearest",
+                   extent=[-0.5, W - 0.5, H - 0.5, -0.5])
     ax.plot([20, 20 + 1 / px], [H - 20] * 2, color=INK, lw=2)
     ax.text(20 + 0.5 / px, H - 28, "1 м", ha="center", va="bottom", fontsize=8, color=INK)
     ax.set_title("Стены: взвешенная доля срезов, где пиксель занят", loc="left", fontsize=10, color=INK)
@@ -199,7 +258,8 @@ def _plot_heat(heat, L, w, info, px, path):
     bx.set_title("Вес среза", loc="left", fontsize=10, color=INK)
     bx.tick_params(labelsize=7, colors=INK2)
     bx.legend(fontsize=7, frameon=False, loc="upper left", bbox_to_anchor=(0.0, -0.04), ncol=2)
-    fig.savefig(path, dpi=110)
+    # пиксель карты - не меньше пикселя картинки
+    fig.savefig(path, dpi=max(110, _pool(h).shape[1] / (fig.get_size_inches()[0] * 0.74)))
     plt.close(fig)
 
 
@@ -223,3 +283,162 @@ def _plot_slices(occ, L, w, path, cols: int = 6):
     fig.tight_layout()
     fig.savefig(path, dpi=90)
     plt.close(fig)
+
+
+# ----------------------------------------------------------------------
+# Разметка карты: стена / дверь / окно / шум
+# ----------------------------------------------------------------------
+
+EMPTY, WALL, DOOR, WINDOW, NOISE = 0, 1, 2, 3, 4
+LABEL_NAMES = {WALL: "стена", DOOR: "дверь", WINDOW: "окно", NOISE: "шум"}
+
+
+def _axis_extent(ys, xs):
+    """Главная ось компоненты: длина вдоль, ширина поперёк, концы (x, y), центр."""
+    p = np.c_[xs, ys].astype(float)
+    c = p.mean(0)
+    if len(p) < 2:
+        return 0.0, 0.0, c, c, c
+    _, _, vt = np.linalg.svd(p - c, full_matrices=False)
+    u = p @ vt[0]
+    v = p @ vt[1]
+    return float(u.max() - u.min() + 1), float(v.max() - v.min() + 1), p[u.argmin()], p[u.argmax()], c
+
+
+def label_heatmap(heat: np.ndarray, px: float, low: np.ndarray | None = None, top: np.ndarray | None = None,
+                  free: np.ndarray | None = None, wall_min: float = 0.7, door_min: float = 0.2, floor_min: float = 0.04
+                  ) -> tuple[np.ndarray, dict]:
+    """Правила по тепловой карте (вес по высоте: низ 1, середина 0,1, верх 0,6):
+      стена - тепло >= wall_min или низ (срезы до 0,9 м) видит >= 50 %: под окном стена есть,
+              окно контур не рвёт; линия от 30 см;
+      дверь - низа нет (< 20 %), верх (от 2 м) есть (>= 40 %) - только перемычка; линия
+              0,5-1,5 м, оба конца у стены (без low/top - по теплу door_min..wall_min);
+      окно  - площадное пятно снаружи контура (откос, стекло, улица) у наружной стены, глубиной
+              до 0,7 м; в нише и за стеклом нет ни пола, ни потолка (free) - иначе это
+              помещение (коридор, светильник в комнате), а не окно;
+      шум   - всё остальное занятое.
+    -> (метки uint8, {"doors": [...], "windows": [...]} в пикселях)."""
+    import cv2
+
+    P = lambda m: max(1, int(round(m / px)))                     # noqa: E731
+    H, W = heat.shape
+    occ = heat >= floor_min
+    lab = np.zeros((H, W), np.uint8)
+    lab[occ] = NOISE
+
+    # --- стены ----------------------------------------------------------------------------
+    wall = (heat >= wall_min) if low is None else ((heat >= wall_min) | ((low >= 0.5) & occ))
+    wall = wall.astype(np.uint8)
+    wall = cv2.morphologyEx(wall, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    n, cl, st, _ = cv2.connectedComponentsWithStats(wall, connectivity=8)
+    for c in range(1, n):
+        if math.hypot(st[c, 2], st[c, 3]) < P(0.3):
+            wall[cl == c] = 0
+    lab[wall > 0] = WALL
+    wall_near = cv2.dilate(wall, np.ones((2 * P(0.08) + 1,) * 2, np.uint8)) > 0
+
+    # --- двери: средняя линия, концами в стену ---------------------------------------------
+    if low is None or top is None:
+        mid = (heat >= door_min) & (heat < wall_min)
+    else:
+        mid = (low < 0.2) & (top >= 0.4)
+    mid = (mid & (wall == 0)).astype(np.uint8)
+    mid = cv2.morphologyEx(mid, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    n, cl, st, _ = cv2.connectedComponentsWithStats(mid, connectivity=8)
+    doors = []
+    for c in range(1, n):
+        ys, xs = np.nonzero(cl == c)
+        length, width, a, b, ctr = _axis_extent(ys, xs)
+        if not (P(0.5) <= length <= P(1.5)) or width > P(0.25) or width > 0.35 * length:
+            continue
+        ends_ok = all(wall_near[min(H - 1, int(round(e[1]))), min(W - 1, int(round(e[0])))] for e in (a, b))
+        if not ends_ok:
+            continue
+        lab[cl == c] = DOOR
+        doors.append({"a": a, "b": b, "center": ctr, "width_px": length})
+
+    # --- снаружи: заливка от края, барьер - стены и двери -------------------------------------
+    barrier = cv2.morphologyEx(((lab == WALL) | (lab == DOOR)).astype(np.uint8), cv2.MORPH_CLOSE,
+                               np.ones((P(0.1),) * 2, np.uint8))
+    ff = (1 - barrier).astype(np.uint8)
+    pad = np.pad(ff, 1, constant_values=1)
+    mask = np.zeros((H + 4, W + 4), np.uint8)
+    cv2.floodFill(pad, mask, (0, 0), 2)
+    outside = pad[1:-1, 1:-1] == 2
+
+    # --- окна: площадное пятно снаружи, вплотную к наружной стене ------------------------------
+    outer_wall = (lab == WALL) & cv2.dilate(outside.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+    near_outer = cv2.dilate(outer_wall.astype(np.uint8), np.ones((2 * P(0.6) + 1,) * 2, np.uint8)) > 0
+    cand = (occ & outside & near_outer & (lab == NOISE)).astype(np.uint8)
+    cand = cv2.morphologyEx(cand, cv2.MORPH_CLOSE, np.ones((P(0.1),) * 2, np.uint8))
+    n, cl, st, _ = cv2.connectedComponentsWithStats(cand, connectivity=8)
+    windows = []
+    free_d = None if free is None else cv2.morphologyEx(free.astype(np.uint8), cv2.MORPH_CLOSE,
+                                                        np.ones((5, 5), np.uint8)).astype(bool)
+    touch = cv2.dilate(outer_wall.astype(np.uint8), np.ones((2 * P(0.06) + 1,) * 2, np.uint8)) > 0
+    for c in range(1, n):
+        comp = cl == c
+        if st[c, 4] * px * px < 0.04 or not (comp & touch).any():
+            continue
+        ys, xs = np.nonzero(comp)
+        # ширина - вдоль стены: по касанию со стеной
+        ty, tx = np.nonzero(comp & touch)
+        width, _, a, b, ctr = _axis_extent(ty, tx)
+        _, depth, _, _, _ = _axis_extent(ys, xs)
+        if not (P(0.4) <= width <= P(2.6)) or depth > P(0.7):
+            continue
+        if free_d is not None and free_d[comp].mean() > 0.3:
+            continue
+        lab[comp & occ & (lab == NOISE)] = WINDOW
+        windows.append({"a": a, "b": b, "center": np.c_[xs, ys].mean(0), "width_px": width, "depth_px": depth})
+    return lab, {"doors": doors, "windows": windows, "outside": outside}
+
+
+def _plot_labels(lab, info, px, path):
+    from matplotlib.colors import ListedColormap
+    from matplotlib.patches import Patch
+
+    from .debug import AQUA, INK, INK2, ORANGE, SURFACE, _plt
+
+    plt = _plt()
+    sl = _crop((lab > 0).astype(float))
+    lb = lab[sl]
+    H, W = lb.shape
+    oy, ox = sl[0].start or 0, sl[1].start or 0
+    colors = [SURFACE, INK, ORANGE, AQUA, "#c9c7c0"]
+    fig = plt.figure(figsize=(12 * W / max(H, W) + 0.4, 12 * H / max(H, W) + 0.9))
+    ax = fig.add_axes([0.01, 0.06, 0.98, 0.88])
+    rank = np.array([0, 4, 3, 2, 1])                 # стена > дверь > окно > шум > пусто
+    ax.imshow(_pool(lb, rank=rank), cmap=ListedColormap(colors), vmin=0, vmax=4, interpolation="nearest",
+              extent=[-0.5, W - 0.5, H - 0.5, -0.5])
+    for d in info["doors"]:
+        x, y = d["center"][0] - ox, d["center"][1] - oy
+        ax.text(x, y - 12, f"{d['width_px'] * px * 1000:.0f}", ha="center", fontsize=7, color=ORANGE)
+    for w in info["windows"]:
+        x, y = w["center"][0] - ox, w["center"][1] - oy
+        ax.text(x, y, f"{w['width_px'] * px * 1000:.0f}", ha="center", va="center", fontsize=7, color=INK2,
+                rotation=90 if abs(w["b"][1] - w["a"][1]) > abs(w["b"][0] - w["a"][0]) else 0)
+    ax.plot([20, 20 + 1 / px], [H - 20] * 2, color=INK, lw=2)
+    ax.text(20 + 0.5 / px, H - 28, "1 м", ha="center", va="bottom", fontsize=8, color=INK)
+    ax.set_title(f"Разметка: дверей {len(info['doors'])}, окон {len(info['windows'])}", loc="left",
+                 fontsize=10, color=INK)
+    ax.axis("off")
+    fig.legend(handles=[Patch(color=c, label=LABEL_NAMES[k]) for k, c in zip((WALL, DOOR, WINDOW, NOISE), colors[1:])],
+               loc="lower left", ncol=4, frameon=False, fontsize=9)
+    fig.savefig(path, dpi=max(110, _pool(lb).shape[1] / (fig.get_size_inches()[0] * 0.98)))
+    plt.close(fig)
+
+
+def _save_full(heat, lab, heat_path, lab_path):
+    """Карта и разметка в полном разрешении: пиксель картинки = пиксель растра."""
+    import cv2
+    from matplotlib import colormaps
+
+    from .debug import AQUA, INK, ORANGE, SURFACE
+
+    sl = _crop(heat)
+    rgb = (colormaps["magma_r"](np.clip(heat[sl], 0, 1))[..., :3] * 255).astype(np.uint8)
+    cv2.imwrite(str(heat_path), rgb[..., ::-1])
+    lut = np.array([[int(c[i:i + 2], 16) for i in (1, 3, 5)] for c in (SURFACE, INK, ORANGE, AQUA, "#c9c7c0")],
+                   np.uint8)
+    cv2.imwrite(str(lab_path), lut[lab[sl]][..., ::-1])
