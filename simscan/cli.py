@@ -104,6 +104,9 @@ def main(argv: list[str] | None = None) -> None:
     cp.add_argument("e57")
     cp.add_argument("--out", help="каталог (по умолчанию <файл>_cellplan рядом с файлом)")
     cp.add_argument("--px", type=float, default=0.01, help="размер пикселя, м")
+    cr = sub.add_parser("calib-real", help="всё для подгонки генератора из E57 в один zip")
+    cr.add_argument("e57", nargs="+", help="файлы E57 (реальные или scan.e57 сцен)")
+    cr.add_argument("--out", required=True, help="каталог отчёта; рядом пишется <каталог>.zip")
     sm = sub.add_parser("slice-map", help="тонкий срез у пола (под радиаторами) от местного пола")
     sm.add_argument("e57")
     sm.add_argument("--out", help="каталог (по умолчанию <файл>_slice рядом с файлом)")
@@ -163,6 +166,11 @@ def main(argv: list[str] | None = None) -> None:
         out = Path(args.out) if args.out else src.with_name(src.stem + "_cellplan")
         cellplan(src, out, px=args.px)
         print(out)
+        return
+    if args.cmd == "calib-real":
+        from .calib_real import calib_real
+
+        print(calib_real(args.e57, args.out))
         return
     if args.cmd == "slice-map":
         from pathlib import Path
