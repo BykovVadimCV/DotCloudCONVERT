@@ -30,7 +30,7 @@ effects:
   people: false
   registration_sigma_mm: [2.0, 6.0]   # толщина линии стены 4,4 см у заказчика против 3,7 при (1, 4)
 interior:
-  mess: [0.5, 1.0]
+  mess: [0.2, 0.6]               # сумки и стопки на полу: precision низа 0,76 при (0,5, 1)
   furniture_per_m2: 0.04         # сверка calib-real: мебели у заказчика мало (precision низа 0,87)
   p_wardrobe_to_ceiling: 0.6     # что есть - чаще под потолок: вертикальный беспорядок вверху
   radiators: true
@@ -39,7 +39,8 @@ interior:
   p_risers: 0.9
 realism:
   wall_unevenness_mm: [6.0, 14.0]   # также неровность пола: 14 мм у заказчика
-  lean_mm_per_m: [0.0, 5.0]
+  unevenness_corr_m: [0.15, 0.5]   # короткие волны толщат линию стены в плане
+  lean_mm_per_m: [0.0, 8.0]
   shear_deg_sigma: 1.0
 export:
   preview: false
