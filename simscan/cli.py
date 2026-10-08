@@ -104,6 +104,12 @@ def main(argv: list[str] | None = None) -> None:
     cp.add_argument("e57")
     cp.add_argument("--out", help="каталог (по умолчанию <файл>_cellplan рядом с файлом)")
     cp.add_argument("--px", type=float, default=0.01, help="размер пикселя, м")
+    sm = sub.add_parser("slice-map", help="тонкий срез у пола (под радиаторами) от местного пола")
+    sm.add_argument("e57")
+    sm.add_argument("--out", help="каталог (по умолчанию <файл>_slice рядом с файлом)")
+    sm.add_argument("--z0", type=float, default=0.03, help="низ среза над полом, м")
+    sm.add_argument("--z1", type=float, default=0.08, help="верх среза над полом, м")
+    sm.add_argument("--px", type=float, default=0.01, help="пиксель, м")
     wh = sub.add_parser("wall-heatmap", help="тепловая карта стен: срезы по высоте с весами")
     wh.add_argument("e57")
     wh.add_argument("--out", help="каталог (по умолчанию <файл>_heat рядом с файлом)")
@@ -156,6 +162,16 @@ def main(argv: list[str] | None = None) -> None:
         src = Path(args.e57)
         out = Path(args.out) if args.out else src.with_name(src.stem + "_cellplan")
         cellplan(src, out, px=args.px)
+        print(out)
+        return
+    if args.cmd == "slice-map":
+        from pathlib import Path
+
+        from .wallheat import slice_map
+
+        src = Path(args.e57)
+        out = Path(args.out) if args.out else src.with_name(src.stem + "_slice")
+        slice_map(src, out, z0=args.z0, z1=args.z1, px=args.px)
         print(out)
         return
     if args.cmd == "wall-heatmap":

@@ -472,3 +472,114 @@ def _save_full(heat, lab, heat_path, lab_path):
     lut = np.array([[int(c[i:i + 2], 16) for i in (1, 3, 5)] for c in (SURFACE, INK, ORANGE, AQUA, "#c9c7c0")],
                    np.uint8)
     cv2.imwrite(str(lab_path), lut[lab[sl]][..., ::-1])
+
+
+# ----------------------------------------------------------------------
+# Тонкий срез у пола (под радиаторами)
+# ----------------------------------------------------------------------
+
+def slice_map(path, out_dir, z0: float = 0.03, z1: float = 0.08, px: float = 0.01, floor_cell_m: float = 0.25,
+              chunk: int = 2_000_000, sample_points: int = 3_000_000, log=print) -> dict:
+    """Карта точек в тонком срезе z0..z1 над полом - под радиаторами (их низ ~10-15 см) видны
+    только стены, плинтусы и стоящее на полу. Высота - от местного пола: медиана точек пола в
+    клетках floor_cell_m (пол у реальных объектов неровный на 1-2 см, срез в 5 см иначе
+    задевает сам пол). На уровень: slice.png (полное разрешение, пиксель = px), slice_view.png
+    (с масштабом), slice.npy (точек в пикселе, float32), floor.npy (местный пол, м)."""
+    import cv2
+
+    from .e57read import E57Reader
+    from .floorplan import _scan_points
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    levels, angle, rot, lo, px, (H, W) = _frame(path, px, chunk, sample_points, log)
+    fc = max(1, int(round(floor_cell_m / px)))
+    Hc, Wc = H // fc + 1, W // fc + 1
+    res = []
+    for li, lv in enumerate(levels, 1):
+        # проход 1: местный пол по клеткам (точки в 6 см от плоскости пола уровня)
+        acc_z = np.zeros(Hc * Wc)
+        acc_n = np.zeros(Hc * Wc)
+        acc_z2 = np.zeros(Hc * Wc)
+        with E57Reader(path) as r:
+            for i in range(len(r.scans)):
+                for p in _scan_points(r, i, chunk):
+                    q = p[:, :2] @ rot.T
+                    jj = ((q[:, 0] - lo[0]) / px).astype(np.int64)
+                    ii = H - 1 - ((q[:, 1] - lo[1]) / px).astype(np.int64)
+                    ok = (ii >= 0) & (ii < H) & (jj >= 0) & (jj < W) & (np.abs(p[:, 2] - lv["floor_z"]) < 0.06)
+                    c = (ii[ok] // fc) * Wc + jj[ok] // fc
+                    acc_n += np.bincount(c, minlength=Hc * Wc)
+                    acc_z += np.bincount(c, p[ok, 2], minlength=Hc * Wc)
+                    acc_z2 += np.bincount(c, p[ok, 2] ** 2, minlength=Hc * Wc)
+        # среднее с отсевом: клетки, где точек мало или разброс велик (мусор на полу) - соседями
+        mean = np.where(acc_n > 20, acc_z / np.maximum(acc_n, 1), np.nan)
+        sd = np.sqrt(np.maximum(acc_z2 / np.maximum(acc_n, 1) - np.nan_to_num(mean) ** 2, 0))
+        mean[sd > 0.015] = np.nan
+        fl = mean.reshape(Hc, Wc)
+        known = np.isfinite(fl)
+        if known.any():                                  # пустые клетки - значение ближайшей известной
+            idx = cv2.distanceTransformWithLabels((~known).astype(np.uint8), cv2.DIST_L2, 5,
+                                                  labelType=cv2.DIST_LABEL_PIXEL)[1]
+            lut = np.zeros(idx.max() + 1)
+            kk = np.nonzero(known)
+            lut[idx[kk]] = fl[kk]
+            fl = lut[idx]
+        else:
+            fl = np.full((Hc, Wc), lv["floor_z"])
+        # проход 2: точки в срезе над местным полом
+        cnt = np.zeros(H * W, np.int64)
+        with E57Reader(path) as r:
+            for i in range(len(r.scans)):
+                for p in _scan_points(r, i, chunk):
+                    q = p[:, :2] @ rot.T
+                    jj = ((q[:, 0] - lo[0]) / px).astype(np.int64)
+                    ii = H - 1 - ((q[:, 1] - lo[1]) / px).astype(np.int64)
+                    ok = (ii >= 0) & (ii < H) & (jj >= 0) & (jj < W)
+                    h = p[ok, 2] - fl[ii[ok] // fc, jj[ok] // fc]
+                    m = (h >= z0) & (h < z1)
+                    cnt += np.bincount((ii[ok] * W + jj[ok])[m], minlength=H * W)
+        cnt = cnt.reshape(H, W).astype(np.float32)
+        sfx = "" if len(levels) == 1 else f"_L{li}"
+        np.save(out / f"slice{sfx}.npy", cnt)
+        np.save(out / f"floor{sfx}.npy", np.repeat(np.repeat(fl, fc, 0), fc, 1)[:H, :W].astype(np.float32))
+        nz = cnt[cnt > 0]
+        ref = float(np.percentile(nz, 95)) if len(nz) else 1.0
+        v = np.clip(np.log1p(cnt) / math.log1p(ref), 0, 1)
+        _save_slice(v, out / f"slice{sfx}.png", out / f"slice_view{sfx}.png", px, z0, z1, lv)
+        flat = float(np.nanstd(mean)) if np.isfinite(mean).any() else 0.0
+        log(f"уровень {li}: срез {z0 * 100:.0f}-{z1 * 100:.0f} см над местным полом, точек {int(cnt.sum())}, "
+            f"разброс пола по клеткам {flat * 1000:.0f} мм")
+        res.append({"level": lv, "points": int(cnt.sum()), "floor_cells_sd_mm": round(flat * 1000, 1)})
+    (out / "slice.json").write_text(json.dumps({"file": Path(path).name, "z_m": [z0, z1], "pixel_m": px,
+                                                "rotation_deg": angle, "origin": list(map(float, lo)),
+                                                "levels": res}, indent=1, ensure_ascii=False, default=float),
+                                    encoding="utf-8")
+    return {"levels": res}
+
+
+def _save_slice(v: np.ndarray, full_path: Path, view_path: Path, px: float, z0: float, z1: float, lv: dict) -> None:
+    import cv2
+    from matplotlib import colormaps
+
+    from .debug import INK, INK2, _plt
+
+    sl = _crop(v, pad=30)
+    vv = v[sl]
+    rgb = (colormaps["magma_r"](vv)[..., :3] * 255).astype(np.uint8)
+    cv2.imwrite(str(full_path), rgb[..., ::-1])
+    plt = _plt()
+    Hh, Ww = vv.shape
+    fig = plt.figure(figsize=(14 * Ww / max(Hh, Ww) + 0.4, 14 * Hh / max(Hh, Ww) + 0.8))
+    ax = fig.add_axes([0.01, 0.05, 0.98, 0.9])
+    im = ax.imshow(_pool(vv), cmap="magma_r", vmin=0, vmax=1, interpolation="nearest",
+                   extent=[-0.5, Ww - 0.5, Hh - 0.5, -0.5])
+    ax.plot([20, 20 + 1 / px], [Hh - 20] * 2, color=INK, lw=2)
+    ax.text(20 + 0.5 / px, Hh - 28, "1 м", ha="center", va="bottom", fontsize=8, color=INK)
+    ax.set_title(f"Срез {z0 * 100:.0f}-{z1 * 100:.0f} см над местным полом (под радиаторами), пиксель "
+                 f"{px * 1000:.0f} мм".replace(".", ","), loc="left", fontsize=11, color=INK)
+    ax.axis("off")
+    cax = fig.add_axes([0.02, 0.02, 0.25, 0.012])
+    fig.colorbar(im, cax=cax, orientation="horizontal").ax.tick_params(labelsize=7, colors=INK2)
+    fig.savefig(view_path, dpi=max(110, _pool(vv).shape[1] / (fig.get_size_inches()[0] * 0.98)))
+    plt.close(fig)

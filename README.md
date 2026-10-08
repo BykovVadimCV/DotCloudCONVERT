@@ -18,6 +18,7 @@
   python -m simscan inspect-e57 путь/к/файлу.e57
   python -m simscan floorplan путь/к/файлу.e57 --out план   # план: стены, двери, окна, комнаты
   python -m simscan wall-heatmap путь/к/файлу.e57 --out heat  # тепловая карта стен по срезам
+  python -m simscan slice-map путь/к/файлу.e57 --out slice    # срез 3-8 см над полом (под радиаторами)
   python -m simscan dataset real путь/к/файлу.e57 --out dataset # вход сети плана (8 каналов)
   python -m simscan wall-heatmap путь/к/файлу.e57 --out heat  # тепловая карта стен по срезам
   ```
