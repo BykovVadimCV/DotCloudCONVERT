@@ -21,9 +21,12 @@ def test_noisy_slices_get_lower_weight(tmp_path):
     path = tmp_path / "apt.e57"
     write_merged_e57(path, pts, np.full(len(pts), 0.5, np.float32))
     res = wall_heatmap(path, tmp_path / "out", px=0.02, log=lambda *a: None)
-    sl = {round(s["z"], 1): s["weight"] for s in res["levels"][0]["slices"]}
-    clean = np.median([sl[z] for z in (1.2, 1.3, 1.4, 1.5)])
-    assert sl[0.7] < clean - 0.05 and sl[2.4] < clean - 0.05, sl
+    sl = {round(s["z"], 1): s for s in res["levels"][0]["slices"]}
+    # качество: срезы со столом и светильником хуже чистых
+    clean = np.median([sl[z]["f1"] for z in (0.3, 0.4, 1.2, 1.3, 2.0)])
+    assert sl[0.7]["f1"] < clean - 0.05 and sl[2.4]["f1"] < clean - 0.05, sl
+    # по высоте: у пола ценится выше, середина почти нет
+    assert sl[0.3]["weight"] > 5 * sl[1.5]["weight"], sl
     heat = np.load(tmp_path / "out" / "heat.npy").astype(float)
     assert heat.max() > 0.9                                   # стена во всю высоту
     assert (heat > 0.5).mean() < 0.1                          # стол и светильник не стали стенами

@@ -11,7 +11,10 @@
 Вес среза - насколько его картина совпадает с устойчивой по высоте структурой:
   точность - доля занятого в срезе, что лежит на структуре (мало - шум, заливка);
   полнота  - доля структуры, что видна в срезе (мало - окна, проёмы, тень);
-  вес = F1 (гармоническое среднее). Структура - пиксели, занятые хотя бы в 4 срезах (40 см
+  качество = F1 (гармоническое среднее);
+вес = априорный вес по высоте x качество. По высоте (по умолчанию): у пола 1 - там стена
+сплошная, середина 1,0-2,0 м - 0,1 - там окна, верх - 0,6. Задаётся --prior.
+Структура - пиксели, занятые хотя бы в 4 срезах (40 см
 по высоте; с весами - на каждом проходе заново). Не «в половине срезов»: иначе стена под
 окном и над ним выпадает из структуры и средние срезы, где окна, ничего не теряют.
 
@@ -96,16 +99,29 @@ def slice_counts(path, px: float = 0.01, slice_m: float = 0.1, margin_m: float =
     return out, {"rotation_deg": angle, "origin": lo.tolist(), "px": px, "shape": [H, W]}
 
 
-def slice_weights(occ: np.ndarray, iters: int = 3, tol_px: int = 1, min_slices: int = 4
-                  ) -> tuple[np.ndarray, np.ndarray, dict]:
+DEFAULT_PRIOR = "0:1,0.8:1,1.0:0.1,2.0:0.1,2.2:0.6,9:0.6"
+
+
+def height_prior(z: np.ndarray, spec: str = DEFAULT_PRIOR) -> np.ndarray:
+    """Априорный вес среза по высоте над полом: ломаная «высота:вес,...». По умолчанию низ
+    (до 0,8 м) - 1: там стена сплошная; середина 1,0-2,0 м - 0,1: там окна; верх - 0,6:
+    перемычки есть, но и короба, светильники."""
+    pts = sorted((float(a), float(b)) for a, b in (t.split(":") for t in spec.split(",")))
+    return np.interp(z, [p[0] for p in pts], [p[1] for p in pts])
+
+
+def slice_weights(occ: np.ndarray, prior: np.ndarray | None = None, iters: int = 3, tol_px: int = 1,
+                  min_slices: int = 4) -> tuple[np.ndarray, np.ndarray, dict]:
     """occ (срез, H, W) bool -> (веса срезов, карта, разбор: точность, полнота)."""
     import cv2
 
     n = len(occ)
     k = np.ones((2 * tol_px + 1, 2 * tol_px + 1), np.uint8)
     dil = np.stack([cv2.dilate(o.astype(np.uint8), k) for o in occ]).astype(bool)
-    w = np.ones(n)
-    support = occ.sum(0).astype(np.float32)          # во скольких срезах занят (с весами)
+    prior = np.ones(n) if prior is None else np.asarray(prior, float)
+    w = prior.copy()
+    f1 = np.ones(n)
+    support = np.tensordot(w, occ.astype(np.float32), 1)   # во скольких срезах занят (с весами)
     prec = rec = np.zeros(n)
     for _ in range(iters):
         # структура - занято хотя бы в min_slices срезах (40 см по высоте), а не в половине:
@@ -115,29 +131,32 @@ def slice_weights(occ: np.ndarray, iters: int = 3, tol_px: int = 1, min_slices: 
         nr = max(int(ref.sum()), 1)
         prec = np.array([(o & ref_d).sum() / max(int(o.sum()), 1) for o in occ])
         rec = np.array([(ref & d).sum() / nr for d in dil])
-        w = np.where(prec + rec > 0, 2 * prec * rec / np.maximum(prec + rec, 1e-9), 0.0)
+        f1 = np.where(prec + rec > 0, 2 * prec * rec / np.maximum(prec + rec, 1e-9), 0.0)
+        w = prior * f1                               # вес = высота (априори) x качество среза
         support = np.tensordot(w, occ.astype(np.float32), 1)
     heat = support / max(w.sum(), 1e-9)
-    return w, heat, {"precision": prec, "recall": rec}
+    return w, heat, {"precision": prec, "recall": rec, "f1": f1, "prior": prior}
 
 
-def wall_heatmap(path, out_dir, px: float = 0.01, slice_m: float = 0.1, log=print) -> dict:
+def wall_heatmap(path, out_dir, px: float = 0.01, slice_m: float = 0.1, prior: str = DEFAULT_PRIOR,
+                 log=print) -> dict:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     data, frame = slice_counts(path, px=px, slice_m=slice_m, log=log)
-    result = {"file": Path(path).name, **frame, "levels": []}
+    result = {"file": Path(path).name, **frame, "prior": prior, "levels": []}
     for li, L in enumerate(data, 1):
         occ = L["counts"] > 0
-        w, heat, info = slice_weights(occ)
+        w, heat, info = slice_weights(occ, height_prior(L["z0"] + L["slice_m"] / 2, prior))
         sfx = "" if len(data) == 1 else f"_L{li}"
         np.save(out / f"heat{sfx}.npy", heat.astype(np.float16))
         _plot_heat(heat, L, w, info, frame["px"], out / f"heat{sfx}.png")
         _plot_slices(occ, L, w, out / f"slices{sfx}.png")
         result["levels"].append({
             "floor_z": round(L["level"]["floor_z"], 3), "ceiling_z": round(L["level"]["ceiling_z"], 3),
-            "slices": [{"z": round(float(z), 2), "weight": round(float(a), 3), "precision": round(float(p), 3),
-                        "recall": round(float(r), 3)}
-                       for z, a, p, r in zip(L["z0"], w, info["precision"], info["recall"])]})
+            "slices": [{"z": round(float(z), 2), "weight": round(float(a), 3), "prior": round(float(pr), 3),
+                        "f1": round(float(f), 3), "precision": round(float(p), 3), "recall": round(float(r), 3)}
+                       for z, a, pr, f, p, r in zip(L["z0"], w, info["prior"], info["f1"], info["precision"],
+                                                    info["recall"])]})
         log(f"уровень {li}: срезов {len(w)}, вес > 0,5 у {int((w > 0.5).sum())}")
     (out / "weights.json").write_text(json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")
     return result
@@ -168,16 +187,18 @@ def _plot_heat(heat, L, w, info, px, path):
     ax.axis("off")
     cax = fig.add_axes([0.03, 0.01, 0.25, 0.012])
     fig.colorbar(im, cax=cax, orientation="horizontal").ax.tick_params(labelsize=7, colors=INK2)
-    bx = fig.add_axes([0.80, 0.08, 0.17, 0.85])
+    bx = fig.add_axes([0.80, 0.14, 0.17, 0.79])
     z = L["z0"] + L["slice_m"] / 2
     bx.barh(z, w, height=L["slice_m"] * 0.8, color="#3b6fb6", label="вес")
-    bx.plot(info["precision"], z, color=ORANGE, lw=1, label="точность")
+    bx.plot(info["prior"], z, color=INK, lw=1.2, ls=":", label="по высоте")
+    bx.plot(info["f1"], z, color=ORANGE, lw=1.4, label="качество (F1)")
+    bx.plot(info["precision"], z, color=ORANGE, lw=0.7, alpha=0.6, label="точность")
     bx.plot(info["recall"], z, color=INK2, lw=1, ls="--", label="полнота")
     bx.set_xlim(0, 1)
     bx.set_ylabel("высота над полом, м", fontsize=8, color=INK2)
     bx.set_title("Вес среза", loc="left", fontsize=10, color=INK)
     bx.tick_params(labelsize=7, colors=INK2)
-    bx.legend(fontsize=7, frameon=False, loc="lower right")
+    bx.legend(fontsize=7, frameon=False, loc="upper left", bbox_to_anchor=(0.0, -0.04), ncol=2)
     fig.savefig(path, dpi=110)
     plt.close(fig)
 

@@ -98,6 +98,8 @@ def main(argv: list[str] | None = None) -> None:
     wh.add_argument("--out", help="каталог (по умолчанию <файл>_heat рядом с файлом)")
     wh.add_argument("--px", type=float, default=0.01, help="размер пикселя, м")
     wh.add_argument("--slice", type=float, default=0.1, help="толщина среза, м")
+    wh.add_argument("--prior", default="0:1,0.8:1,1.0:0.1,2.0:0.1,2.2:0.6,9:0.6",
+                    help="вес среза по высоте над полом: «высота:вес,...» (ломаная)")
     cm = sub.add_parser("compare-e57", help="сравнить отчёты inspect-e57 (реальный скан и синтетика)")
     cm.add_argument("reports", nargs="+", help="report.json")
     cm.add_argument("--names", nargs="+")
@@ -133,7 +135,7 @@ def main(argv: list[str] | None = None) -> None:
 
         src = Path(args.e57)
         out = Path(args.out) if args.out else src.with_name(src.stem + "_heat")
-        wall_heatmap(src, out, px=args.px, slice_m=args.slice)
+        wall_heatmap(src, out, px=args.px, slice_m=args.slice, prior=args.prior)
         print(out)
         return
     if args.cmd == "compare-e57":
