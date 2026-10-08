@@ -50,7 +50,11 @@ def _frame(path, px: float, chunk: int, sample_points: int, log):
             for p in _scan_points(r, i, chunk):
                 sample.append(p[rng.random(len(p)) < p_keep].astype(np.float32))
     sample = np.concatenate(sample).astype(float)
-    levels = detect_levels(sample)
+    from .netinput import station_positions
+
+    with E57Reader(path) as r:
+        st = station_positions(r)
+    levels = detect_levels(sample, stations_z=st[:, 2] if len(st) else None)
     if not levels:
         fl, ce = floor_ceiling(sample[:, 2])
         levels = [{"floor_z": fl, "ceiling_z": ce, "height_m": ce - fl}]
