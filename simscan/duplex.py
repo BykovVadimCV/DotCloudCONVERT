@@ -112,15 +112,16 @@ def plan_stair(layout: Layout, dz: float, rng, p_spiral: float = 0.3) -> dict | 
                     depth = (y1 - y0) if side in ("B", "T") else (x1 - x0)
                     if along < run + 0.1 or depth < width + 0.9:
                         continue
-                    # выход сверху - не в стену: за концом марша не меньше 0,8 м помещения
+                    # выход: в торец, если за концом марша не меньше 0,8 м помещения, иначе вбок
+                    # с последних ступеней (марш упирается в угол - частый случай в квартирах)
                     starts = [(float(x), d) for x in np.arange(0.0, along - run + 1e-6, 0.1)
-                              for d in (1, -1)
-                              if (along - x - run if d > 0 else x) >= 0.8
-                              and not _openings_near(layout, p0, p1, x, x + run)]
+                              for d in (1, -1) if not _openings_near(layout, p0, p1, x, x + run)]
                     if not starts:
                         continue
                     a, up_dir = starts[int(rng.integers(len(starts)))]
-                    return _straight(room, rect, side, a, run, width, tread, rise, n, up_dir, H0)
+                    st = _straight(room, rect, side, a, run, width, tread, rise, n, up_dir, H0)
+                    st["exit"] = "end" if (along - a - run if up_dir > 0 else a) >= 0.8 else "side"
+                    return st
             else:
                 D = _u(rng, (1.4, 1.8))
                 if min(x1 - x0, y1 - y0) < D + 1.0:
@@ -249,10 +250,20 @@ def railing_item(st: dict, layout: Layout, rng, item_id: int, refl: float) -> It
     h = _u(rng, (0.9, 1.05))
     glass = rng.random() < 0.3
     boxes = []
+    side_exit = st.get("exit") == "side"
+    if side_exit:                                     # сход вбок: торец ограждён, открытая сторона - не до верха
+        open_side = {"B": "T", "T": "B", "L": "R", "R": "L"}[st["wall_side"]]
     for s, (p, q) in sides.items():
-        if at_wall[s] or s == exit_side:
+        if at_wall[s] or (s == exit_side and not side_exit):
             continue
         p, q = np.asarray(p), np.asarray(q)
+        if side_exit and s == open_side:              # оставить 0,9 м у верхнего конца марша
+            top = q if st["up_dir"] > 0 else p
+            d = (q - p) / max(float(np.linalg.norm(q - p)), 1e-9)
+            if st["up_dir"] > 0:
+                q = top - d * 0.9
+            else:
+                p = top + d * 0.9
         L = float(np.linalg.norm(q - p))
         if L < 0.2:
             continue

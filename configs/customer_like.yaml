@@ -9,6 +9,7 @@
 #   python -m simscan generate --config configs/customer_like.yaml --count 100 --out out
 layout:
   p_duplex: 0.25                 # двухуровневые квартиры: лестница, проём в перекрытии (класс 7)
+  duplex_p_spiral: 0.15
 scanner:
   angular_step_deg: 0.1          # 0,0667 у BLK360; 0,1 - быстрее, плотность в растре 2 см та же
   elevation_min_deg: -60.0
