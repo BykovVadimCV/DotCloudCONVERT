@@ -199,7 +199,8 @@ def floor_ceiling(z: np.ndarray) -> tuple[float | None, float | None]:
 
 
 def coverage_input(points: np.ndarray, frame: RasterFrame, floor_z: float, ceil_z: float,
-                   band: float = 0.04, close_m: float = 0.6, ext_wall_m: float = 0.4) -> dict:
+                   band: float = 0.04, close_m: float = 0.6, ext_wall_m: float = 0.4,
+                   spacing_m: float = 0.015) -> dict:
     """Вход сети для сведённого облака (одно облако без станций и сетки, как экспорт
     Cyclone REGISTER 360): свободно - где есть точки пола или потолка. Потолок виден почти
     везде (мебель его не закрывает), над стенами и в толще перегородок точек потолка нет -
@@ -213,7 +214,9 @@ def coverage_input(points: np.ndarray, frame: RasterFrame, floor_z: float, ceil_
     ok = (i >= 0) & (i < H) & (j >= 0) & (j < W)
     free = np.zeros((H, W), np.uint8)
     free[i[ok], j[ok]] = 1
-    free = cv2.morphologyEx(free, cv2.MORPH_CLOSE, _disk(max(2.0, 0.03 / frame.pixel_m)))
+    # дырки покрытия закрываются на 2 шага точек, не больше: щель над перегородкой 8-10 см
+    # должна остаться (при 3 см её заливало - тонкие перегородки пропадали)
+    free = cv2.morphologyEx(free, cv2.MORPH_CLOSE, _disk(max(1.0, 2 * spacing_m / frame.pixel_m)))
     info = [{"floor_z": round(floor_z, 3), "ceiling_z": round(ceil_z, 3)}]
     return _compose(free, np.zeros_like(free), frame.pixel_m, close_m, ext_wall_m, info)
 

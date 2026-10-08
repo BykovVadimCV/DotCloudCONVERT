@@ -447,7 +447,8 @@ def _unified_info(points: np.ndarray, img_st: np.ndarray, p_keep: float) -> dict
     from .rasterize import floor_ceiling
 
     fl, ce = floor_ceiling(points[:, 2])
-    out = {"setups_from_images": int(len(img_st)), "floor_z": fl, "ceiling_z": ce}
+    out = {"setups_from_images": int(len(img_st)), "floor_z": fl, "ceiling_z": ce,
+           "sample_fraction": round(float(min(p_keep, 1.0)), 4)}
     if fl is None:
         return out
     out["ceiling_height_m"] = round(ce - fl, 3)
@@ -482,7 +483,10 @@ def _plan_coverage(points, uinfo, img_st, out: Path) -> dict | None:
     px = max(0.01, float((hi - lo).max()) / 2048)
     w, h = int(math.ceil((hi[0] - lo[0]) / px)), int(math.ceil((hi[1] - lo[1]) / px))
     frame = RasterFrame(float(lo[0]), float(lo[1]), px, w, h)
-    res = coverage_input(points, frame, uinfo["floor_z"], uinfo["ceiling_z"])
+    spacing = (uinfo.get("point_spacing_mm") or 15.0) / 1000
+    # в выборке точек меньше, чем в файле: шаг выборки больше в 1/sqrt(доли) раз
+    spacing *= 1 / math.sqrt(max(uinfo.get("sample_fraction", 1.0), 1e-6))
+    res = coverage_input(points, frame, uinfo["floor_z"], uinfo["ceiling_z"], spacing_m=spacing)
     cv2.imwrite(str(out / "input.png"), res["image"])
     return {"frame": frame, "res": res, "markers": img_st, "floor_z": uinfo["floor_z"],
             "info": {"method": "coverage", "pixel_mm": round(px * 1000, 2), "size_px": [h, w],
