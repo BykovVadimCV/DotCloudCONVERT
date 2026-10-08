@@ -300,14 +300,24 @@ class SceneBuilder:
 
     # --- перекрытия --------------------------------------------------------
     def _slabs(self, mat: dict) -> None:
+        """Пол и перекрытие. layout.meta["slab"] (двухуровневые квартиры, duplex.py):
+        {"floor"|"ceiling": {"holes": [прямоугольники], "thickness": м}} - проём и толщина слоя."""
         H = self.layout.ceiling_height
+        cfg = self.layout.meta.get("slab", {})
         floor_i, ceil_i = self._new_instance(), self._new_instance()
-        for k, (x0, y0, x1, y1) in enumerate(self.layout.slab_rects()):
-            cx, cy, sx, sy = (x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0
-            self._add(Box((cx, cy, -SLAB_M / 2), (sx, sy, SLAB_M)), "floor",
-                      mat.get("floor", 0.4), f"slab:{k}", floor_i, deform=True)
-            self._add(Box((cx, cy, H + SLAB_M / 2), (sx, sy, SLAB_M)), "ceiling",
-                      mat.get("ceiling", 0.8), f"slab:{k}", ceil_i, deform=True)
+        for part, label, inst, refl in (("floor", "floor", floor_i, mat.get("floor", 0.4)),
+                                        ("ceiling", "ceiling", ceil_i, mat.get("ceiling", 0.8))):
+            c = cfg.get(part, {})
+            t = float(c.get("thickness", SLAB_M))
+            rects = list(self.layout.slab_rects())
+            for h in c.get("holes", []):
+                from .duplex import subtract_rect
+
+                rects = [q for r in rects for q in subtract_rect(r, h)]
+            zc = -t / 2 if part == "floor" else H + t / 2
+            for k, (x0, y0, x1, y1) in enumerate(rects):
+                self._add(Box(((x0 + x1) / 2, (y0 + y1) / 2, zc), (x1 - x0, y1 - y0, t)), label, refl,
+                          f"slab:{k}", inst, deform=True)
         for r in self.layout.rooms:
             if r.ceiling_z < H - 1e-6:
                 inst = self._new_instance()

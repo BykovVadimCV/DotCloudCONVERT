@@ -206,6 +206,9 @@ class Furnisher:
         layout.meta["bare"] = self.bare
         self._set_doors(layout)
         grids = {r.id: RoomGrid(r) for r in layout.rooms}
+        for rect in layout.meta.get("reserved", []):        # лестница, проём в перекрытии
+            for g in grids.values():
+                g.mark(tuple(rect), 0.4)
         self._reserve_openings(layout, grids)
         if self.cfg.door_frames:
             self._door_frames(layout)

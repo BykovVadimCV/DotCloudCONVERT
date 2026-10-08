@@ -62,6 +62,8 @@ class LayoutConfig:
     passage_width_m: Range = (0.8, 1.6)
     passage_head_m: Range = (2.0, 2.4)
     p_entrance: float = 1.0
+    p_duplex: float = 0.0               # двухуровневая квартира: второй этаж, лестница, проём (duplex.py)
+    duplex_p_spiral: float = 0.3        # доля винтовых лестниц (иначе прямой марш у глухой стены)
     entrance_width_m: Range = (0.9, 1.0)
     window_width_m: Range = (0.6, 1.8)
     window_sill_m: Range = (0.6, 0.9)   # на здание

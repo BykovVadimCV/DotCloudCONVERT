@@ -236,21 +236,25 @@ def _fill(mask: np.ndarray, poly_world, frame: dict, value=1) -> None:
 
 
 class SceneGT:
-    """Эталон сцены генератора в мировой СК облака: сдвиг realism (warp) и курс мира."""
+    """Эталон сцены генератора в мировой СК облака: сдвиг realism (warp) и курс мира.
+    level - этаж двухуровневой квартиры (layout.json "levels", duplex.py), 0 - нижний."""
 
-    def __init__(self, scene_dir):
+    def __init__(self, scene_dir, level: int = 0):
         from .layout import Layout
         from .transform import WorldTransform
 
         self.dir = Path(scene_dir)
         self.doc = json.loads((self.dir / "layout.json").read_text(encoding="utf-8"))
-        self.layout = Layout.from_dict(self.doc)
+        self.levels = self.doc.get("levels") or [{"z0": 0.0}]
+        self.level = level
+        lv = self.levels[level]
+        self.layout = Layout.from_dict(lv["layout"] if "layout" in lv else self.doc)
         meta = self.doc.get("meta", {})
         w = meta.get("layout_to_world", {})
         self.world = WorldTransform(w.get("yaw_deg", 0.0), tuple(w.get("offset_m", (0.0, 0.0, 0.0))))
-        A = self.layout.meta.get("warp")
+        A = meta.get("warp")
         self.A = np.eye(2) if A is None else np.asarray(A, float)
-        self.floor_z = float(self.world.offset[2])
+        self.floor_z = float(self.world.offset[2]) + float(lv.get("z0", 0.0))
         self.ceiling_h = float(self.layout.ceiling_height)
 
     def xy(self, pts) -> np.ndarray:
@@ -259,7 +263,9 @@ class SceneGT:
         return self.world.to_world(np.c_[p, np.zeros(len(p))])[:, :2]
 
     def stations(self) -> np.ndarray:
-        return np.array([s["pose_true"]["t"] for s in self.doc.get("stations", [])], float).reshape(-1, 3)
+        """Стоянки этого этажа (мир)."""
+        return np.array([s["pose_true"]["t"] for s in self.doc.get("stations", [])
+                         if s.get("level", 0) == self.level], float).reshape(-1, 3)
 
     # стена: прямоугольник по оси s и смещению поперёк (в СК плана) -> мир
     def wall_quad(self, w, s0, s1, o0, o1) -> np.ndarray:
@@ -364,6 +370,11 @@ def label_level(gt: SceneGT, frame: dict) -> dict:
                 _fill(clutter, gt.xy(np.c_[c[0] + pr["radius"] * np.cos(ang), c[1] + pr["radius"] * np.sin(ang)]),
                       frame)
     sem[(clutter > 0) & (sem == INTERIOR)] = CLUTTER
+    # проём в перекрытии (верхний этаж) и лестница под ним (нижний) - duplex.py
+    for x0, y0, x1, y1 in lay.meta.get("void_rects", []):
+        m = np.zeros((H, W), np.uint8)
+        _fill(m, gt.xy([(x0, y0), (x1, y0), (x1, y1), (x0, y1)]), frame)
+        sem[(m > 0) & np.isin(sem, (INTERIOR, CLUTTER))] = VOID
     # расстояние до видимой грани: граница тела стены (с проёмами) с помещением
     solid = (body > 0) | np.isin(sem, (WALL, DOOR, WINDOW, OPENING))
     k3 = np.ones((3, 3), np.uint8)
@@ -477,22 +488,27 @@ def build_scene(scene_dir, root, px: float = PIXEL_M, use_gt_levels: bool = Fals
     Возвращает записанные каталоги."""
     root = Path(root)
     write_meta(root)
-    gt = SceneGT(scene_dir)
-    e57 = gt.dir / "scan.e57"
+    gt0 = SceneGT(scene_dir)
+    gts = [gt0] + [SceneGT(scene_dir, k) for k in range(1, len(gt0.levels))]
+    e57 = gt0.dir / "scan.e57"
     if not e57.exists():
-        e57 = gt.dir / "scan_merged.e57"
-    levels = [{"floor_z": gt.floor_z, "ceiling_z": gt.floor_z + gt.ceiling_h, "height_m": gt.ceiling_h}] \
+        e57 = gt0.dir / "scan_merged.e57"
+    levels = [{"floor_z": g.floor_z, "ceiling_z": g.floor_z + g.ceiling_h, "height_m": g.ceiling_h} for g in gts] \
         if use_gt_levels else None
-    meta = gt.doc.get("meta", {})
+    meta = gt0.doc.get("meta", {})
     seed, index = meta.get("seed", 0), meta.get("index", 0)
     res = rasterize_e57(e57, px=px, levels=levels, thin=thin, z_shift=z_shift,
                         seed=int(seed) * 1000 + int(index), log=log)
-    # уровень сцены (генератор - один этаж): ближайший по полу к эталону
-    best = min(res, key=lambda r: abs(r["level"]["floor_z"] - gt.floor_z))
-    scene_id = gt.dir.name
+    # каждому этажу эталона - ближайший по полу найденный уровень (не дальше 0,5 м)
+    pairs = []
+    for g in gts:
+        r = min(res, key=lambda r: abs(r["level"]["floor_z"] - g.floor_z))
+        if abs(r["level"]["floor_z"] - g.floor_z) < 0.5 and all(r is not q for _, q in pairs):
+            pairs.append((g, r))
+    scene_id = gt0.dir.name
     out_dirs = []
-    for k, r in enumerate([best]):
-        d = root / "scenes" / scene_id / f"L{k + 1}"
+    for k, (gt, r) in enumerate(pairs):
+        d = root / "scenes" / scene_id / f"L{gt.level + 1}"
         d.mkdir(parents=True, exist_ok=True)
         lab = label_level(gt, r["frame"])
         np.save(d / "input.npy", r["input"])
@@ -503,7 +519,7 @@ def build_scene(scene_dir, root, px: float = PIXEL_M, use_gt_levels: bool = Fals
         np.save(d / "orient.npy", lab["orient"])
         np.save(d / "heights.npy", lab["heights"])
         (d / "vector.json").write_text(json.dumps(vector_doc(gt), indent=1, ensure_ascii=False), encoding="utf-8")
-        sc = {"scene_id": scene_id, "level": f"L{k + 1}", "layout_key": f"{meta.get('seed')}:{meta.get('index')}",
+        sc = {"scene_id": scene_id, "level": f"L{gt.level + 1}", "levels_in_scene": len(gts), "layout_key": f"{meta.get('seed')}:{meta.get('index')}",
               "seed": seed, "index": index, "effects": meta.get("effects_sampled", {}),
               "realism": meta.get("realism", {}), "stations_world": gt.stations().round(4).tolist(),
               "floor_z": r["level"]["floor_z"], "ceiling_z": r["level"]["ceiling_z"],
@@ -514,7 +530,7 @@ def build_scene(scene_dir, root, px: float = PIXEL_M, use_gt_levels: bool = Fals
         _preview(r["input"].astype(np.float32), lab["sem_raw"], d / "preview.png")
         out_dirs.append(str(d))
         if splits:
-            _append_split(root, _split_of(sc["layout_key"]), f"{scene_id}/L{k + 1}")
+            _append_split(root, _split_of(sc["layout_key"]), f"{scene_id}/L{gt.level + 1}")
     return out_dirs
 
 

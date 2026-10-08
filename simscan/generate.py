@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -74,12 +74,36 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
     if real["enabled"]:
         realism.jitter_thickness(layout, cfg.realism.thickness_jitter_mm, rng)
         layout.meta["warp"] = real["warp"]
+    duplex = None
+    if cfg.layout.p_duplex > 0 and rng.random() < cfg.layout.p_duplex:
+        from .duplex import make_duplex
+
+        duplex = make_duplex(layout, cfg, rng)          # None - лестница не встала: один этаж
     grids = Furnisher(cfg.interior, rng).furnish(layout)
     stations = place_stations(layout, grids, cfg.scanner, rng)
+    level_of = [0] * len(stations)
+    if duplex:
+        from .duplex import build_duplex_scene, upper_realism
+
+        up, dz = duplex["upper"], duplex["dz"]
+        m = float(layout.meta.get("mess", 0.5))
+        icfg = replace(cfg.interior, exterior_ground=False, mess=(m, m),
+                       p_bare=1.0 if layout.meta.get("bare") else 0.0)
+        grids_up = Furnisher(icfg, rng).furnish(up)
+        st_up = place_stations(up, grids_up, cfg.scanner, rng)
+        for st in st_up:                                 # верхний этаж: свои помещения в grids, z от пола 1-го
+            st.id = len(stations)
+            st.room_id += 1000
+            st.position = (st.position[0], st.position[1], st.position[2] + dz)
+            stations.append(st)
+            level_of.append(1)
+        grids.update({k + 1000: g for k, g in grids_up.items()})
+        mesh, solids, _ = build_duplex_scene(layout, up, dz, real, upper_realism(real, rng))
+    else:
+        mesh, solids = build_scene(layout, real.get("tessellation_m"))
+        realism.apply_to_mesh(mesh, real)
     if not stations:
         raise RuntimeError("не удалось поставить ни одной станции")
-    mesh, solids = build_scene(layout, real.get("tessellation_m"))
-    realism.apply_to_mesh(mesh, real)
     for st in stations:                     # станции живут в той же (сдвинутой) СК, что и сцена
         xy = realism.warp_xy(np.array(st.position[:2])[None], real)[0]
         st.position = (float(xy[0]), float(xy[1]), st.position[2])
@@ -102,8 +126,8 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
                                         instance0=1_000_000 + 100 * k)
             for person in people:                # люди стоят в сдвинутой СК, как и сцена
                 cx, cy = realism.warp_xy(np.array(person.box.center[:2])[None], real)[0]
-                person.box = Box((float(cx), float(cy), person.box.center[2]), person.box.size,
-                                 person.box.yaw)
+                cz = person.box.center[2] + (duplex["dz"] if level_of[k] else 0.0)
+                person.box = Box((float(cx), float(cy), cz), person.box.size, person.box.yaw)
         scan = sim.scan(st, people)
         # истинная поза в СК объекта
         R_true = world.R @ st.rotation()
@@ -116,7 +140,8 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
         scans.append(scan)
         poses.append((R_w, t_w))
         station_info.append({
-            "id": st.id, "room_id": st.room_id, "position_layout_m": list(st.position),
+            "id": st.id, "room_id": st.room_id % 1000, "level": level_of[k],
+            "position_layout_m": list(st.position),
             "heading_deg": st.heading_deg, "tilt_deg": list(st.tilt_deg),
             "pose_true": {"R": R_true.tolist(), "t": t_true.tolist()},
             "pose_written": {"R": np.asarray(R_w).tolist(), "t": np.asarray(t_w).tolist()},
@@ -167,11 +192,15 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
         "config": config_to_dict(cfg),
     })
     doc["stations"] = station_info
+    if duplex:                                           # уровни: нижний - сам doc, верхний - отдельно
+        doc["levels"] = [{"z0": 0.0, "ceiling_height": layout.ceiling_height},
+                         {"z0": duplex["dz"], "ceiling_height": duplex["upper"].ceiling_height,
+                          "layout": duplex["upper"].to_dict()}]
     (out / "layout.json").write_text(json.dumps(doc, indent=1, ensure_ascii=False), encoding="utf-8")
 
     if ex.write_mesh:
         mesh.save_ply(out / "mesh.ply")
-    summary = {"dir": str(out), "rooms": len(layout.rooms), "stations": len(stations),
+    summary = {"dir": str(out), "levels": 2 if duplex else 1, "rooms": len(layout.rooms), "stations": len(stations),
                "openings": len(layout.openings), "items": len(layout.items),
                "points_valid": int(sum(s.n_valid for s in scans))}
     if ex.preview:
