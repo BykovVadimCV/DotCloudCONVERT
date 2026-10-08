@@ -202,6 +202,8 @@ class Furnisher:
         }
         self.mess = self._u(self.cfg.mess)
         layout.meta["mess"] = round(self.mess, 3)
+        self.bare = bool(rng.random() < self.cfg.p_bare)
+        layout.meta["bare"] = self.bare
         self._set_doors(layout)
         grids = {r.id: RoomGrid(r) for r in layout.rooms}
         self._reserve_openings(layout, grids)
@@ -212,15 +214,18 @@ class Furnisher:
             self._wall_fixtures(layout, room, g)
             self._columns(layout, room, g)
             self._risers(layout, room, g)
-            if self.cfg.furniture:
+            if self.cfg.furniture and self.bare:
+                self._bare_fixtures(layout, room, g)
+            elif self.cfg.furniture:
                 self._furniture(layout, room, g)
                 self._extras(layout, room, g)
-            self._curtains(layout, room)
-            self._clutter(layout, room, g)
-            if self.cfg.furniture:
+            if not self.bare:
+                self._curtains(layout, room)
+            self._clutter(layout, room, g, 0.3 if self.bare else 1.0)
+            if self.cfg.furniture and not self.bare:
                 self._mess(layout, room, g)
                 self._scans(layout, room, g)
-        if self.cfg.baseboards:
+        if self.cfg.baseboards and not self.bare:
             for room in layout.rooms:
                 self._baseboards(layout, room)
         if self.cfg.exterior_ground:
@@ -419,8 +424,8 @@ class Furnisher:
         r = max(w, d) / 2 + 0.6
         g.mark((x - r, y - r, x + r, y + r), 0.0)
 
-    def _clutter(self, layout: Layout, room: Room, g: RoomGrid) -> None:
-        n = int(self.rng.poisson(room.area * self.cfg.clutter_per_m2))
+    def _clutter(self, layout: Layout, room: Room, g: RoomGrid, scale: float = 1.0) -> None:
+        n = int(self.rng.poisson(room.area * self.cfg.clutter_per_m2 * scale))
         for _ in range(n):
             s = self._u((0.25, 0.6))
             pts = g.free_points(s)
@@ -685,6 +690,23 @@ class Furnisher:
         self._add(layout, "riser", "fixture", [], self._u((0.3, 0.8)), room.id, prims)
         g.mark((min(cx, cx + sx * 0.4), min(cy, cy + sy * 0.25), max(cx, cx + sx * 0.4),
                 max(cy, cy + sy * 0.25)), 0.0)
+
+    def _bare_fixtures(self, layout: Layout, room: Room, g: RoomGrid) -> None:
+        """Квартира под отделку: сантехника в санузле и патрон с лампой на проводе под потолком."""
+        rng = self.rng
+        if room.kind == "bath":
+            for kind in MANDATORY["bath"]:
+                self._place_wall_item(layout, room, g, kind)
+        if room.kind == "balcony" or rng.random() < 0.2:
+            return
+        a, b, c, d = max(room.rects(), key=lambda r: (r[2] - r[0]) * (r[3] - r[1]))
+        x, y = (a + c) / 2 + rng.normal(0, 0.15), (b + d) / 2 + rng.normal(0, 0.15)
+        drop = self._u((0.05, 0.4))
+        z = room.ceiling_z - drop
+        prims = [{"type": "cylinder", "center": [x, y, z], "radius": self._u((0.03, 0.05)), "height": 0.1},
+                 {"type": "cylinder", "center": [x, y, (z + room.ceiling_z) / 2], "radius": 0.004,
+                  "height": drop}]
+        self._add(layout, "lamp", "fixture", [], self._u((0.5, 0.9)), room.id, prims)
 
     def _extras(self, layout: Layout, room: Room, g: RoomGrid) -> None:
         """Растения, вешалки, светильники, телевизоры и картины на стенах."""

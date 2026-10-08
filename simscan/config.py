@@ -76,6 +76,8 @@ class LayoutConfig:
 @dataclass
 class InteriorConfig:
     furniture: bool = True              # False - без мебели вовсе (и без обязательной кухни/санузла)
+    p_bare: float = 0.0                 # доля квартир «под отделку»: только сантехника и патроны на проводе,
+                                        # без мебели, штор, вещей и плинтусов, строительного мусора мало
     furniture_per_m2: float = 0.12
     p_dark_furniture: float = 0.2       # отражательная способность 0,03-0,1
     p_wardrobe_to_ceiling: float = 0.3

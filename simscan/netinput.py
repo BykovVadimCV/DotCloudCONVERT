@@ -468,10 +468,13 @@ def write_meta(root: Path) -> None:
     (root / "meta.json").write_text(json.dumps(meta_doc(), indent=1, ensure_ascii=False), encoding="utf-8")
 
 
-def build_scene(scene_dir, root, px: float = PIXEL_M, use_gt_levels: bool = False, log=print) -> list[str]:
+def build_scene(scene_dir, root, px: float = PIXEL_M, use_gt_levels: bool = False, thin: float = 0.0,
+                z_shift: float = 0.0, splits: bool = True, log=print) -> list[str]:
     """Сцена генератора -> dataset/scenes/<scene>/<level>/. Вход - из scan.e57 тем же
     растеризатором, что и для реальных файлов; уровни - detect_levels, как у реальных (или
-    эталонные, use_gt_levels). Возвращает записанные каталоги."""
+    эталонные, use_gt_levels). thin, z_shift - аугментации облака (см. rasterize_e57);
+    splits=False - не трогать splits/*.txt (их ведёт вызывающий, напр. при параллельной сборке).
+    Возвращает записанные каталоги."""
     root = Path(root)
     write_meta(root)
     gt = SceneGT(scene_dir)
@@ -482,7 +485,8 @@ def build_scene(scene_dir, root, px: float = PIXEL_M, use_gt_levels: bool = Fals
         if use_gt_levels else None
     meta = gt.doc.get("meta", {})
     seed, index = meta.get("seed", 0), meta.get("index", 0)
-    res = rasterize_e57(e57, px=px, levels=levels, seed=int(seed) * 1000 + int(index), log=log)
+    res = rasterize_e57(e57, px=px, levels=levels, thin=thin, z_shift=z_shift,
+                        seed=int(seed) * 1000 + int(index), log=log)
     # уровень сцены (генератор - один этаж): ближайший по полу к эталону
     best = min(res, key=lambda r: abs(r["level"]["floor_z"] - gt.floor_z))
     scene_id = gt.dir.name
@@ -504,11 +508,13 @@ def build_scene(scene_dir, root, px: float = PIXEL_M, use_gt_levels: bool = Fals
               "realism": meta.get("realism", {}), "stations_world": gt.stations().round(4).tolist(),
               "floor_z": r["level"]["floor_z"], "ceiling_z": r["level"]["ceiling_z"],
               "floor_z_gt": gt.floor_z, "ceiling_z_gt": gt.floor_z + gt.ceiling_h,
-              "frame": r["frame"], "pixel_to_world": affine(r["frame"]), "rasterizer": RASTERIZER_VERSION}
+              "frame": r["frame"], "pixel_to_world": affine(r["frame"]), "rasterizer": RASTERIZER_VERSION,
+              "bare": meta.get("bare"), "aug": {"thin": thin, "z_shift": z_shift}}
         (d / "scene.json").write_text(json.dumps(sc, indent=1, ensure_ascii=False, default=float), encoding="utf-8")
         _preview(r["input"].astype(np.float32), lab["sem_raw"], d / "preview.png")
         out_dirs.append(str(d))
-        _append_split(root, _split_of(sc["layout_key"]), f"{scene_id}/L{k + 1}")
+        if splits:
+            _append_split(root, _split_of(sc["layout_key"]), f"{scene_id}/L{k + 1}")
     return out_dirs
 
 

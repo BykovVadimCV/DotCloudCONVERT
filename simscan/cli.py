@@ -65,6 +65,16 @@ def main(argv: list[str] | None = None) -> None:
     g.add_argument("--workers", type=int, default=1)
     g.add_argument("--config")
     g.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    md = sub.add_parser("make-dataset", help="сцены -> сразу датасет сети плана (сканы удаляются)")
+    md.add_argument("--out", required=True, help="корень датасета")
+    md.add_argument("--count", type=int, default=100)
+    md.add_argument("--seed", type=int, default=0)
+    md.add_argument("--start", type=int, default=0, help="номер первой сцены (разные машины - разные диапазоны)")
+    md.add_argument("--workers", type=int, default=1)
+    md.add_argument("--work-dir", help="временный каталог сканов (по умолчанию <out>/_work)")
+    md.add_argument("--keep-scans", action="store_true", help="не удалять сцены генератора")
+    md.add_argument("--config")
+    md.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     d = sub.add_parser("dump-config", help="напечатать конфигурацию по умолчанию (YAML)")
     d.add_argument("--config")
     pl = sub.add_parser("plans", help="только планировки + рендер (без сканирования)")
@@ -94,7 +104,9 @@ def main(argv: list[str] | None = None) -> None:
     fp.add_argument("--out", help="каталог (по умолчанию <файл>_plan рядом с файлом)")
     fp.add_argument("--px", type=float, default=0.01, help="размер пикселя растров, м")
     ds = sub.add_parser("dataset", help="датасет для сети плана: вход 8 каналов + разметка")
-    ds.add_argument("action", choices=["build", "real"], help="build - сцены генератора, real - реальные E57")
+    ds.add_argument("action", choices=["build", "real", "splits", "pack"],
+                    help="build - сцены генератора, real - реальные E57, splits - пересобрать splits/*.txt "
+                         "по каталогу датасета, pack - датасет в один zip (--out архив)")
     ds.add_argument("paths", nargs="+", help="каталоги сцен (build) или файлы E57 (real)")
     ds.add_argument("--out", required=True, help="корень датасета")
     ds.add_argument("--id", help="real: имя объекта (по умолчанию имя файла)")
@@ -152,9 +164,25 @@ def main(argv: list[str] | None = None) -> None:
         floorplan(src, out, px=args.px)
         print(out)
         return
+    if args.cmd == "make-dataset":
+        from .config import load_config
+        from .makedata import make_dataset
+
+        cfg = load_config(args.config, _parse_set(args.set))
+        make_dataset(cfg, args.out, args.count, args.seed, args.start, args.workers, work_dir=args.work_dir,
+                     keep_scans=args.keep_scans)
+        return
     if args.cmd == "dataset":
+        from .makedata import pack, rebuild_splits
         from .netinput import build_real, build_scene
 
+        if args.action == "splits":
+            for p in args.paths:
+                print(p, rebuild_splits(p))
+            return
+        if args.action == "pack":
+            print(pack(args.paths[0], args.out))
+            return
         for p in args.paths:
             if args.action == "build":
                 print("\n".join(build_scene(p, args.out, px=args.px, use_gt_levels=args.gt_levels)))
