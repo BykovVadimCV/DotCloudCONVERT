@@ -181,7 +181,9 @@ class ExportConfig:
     world_yaw: bool = True                      # случайный поворот здания в СК объекта
     world_offset_m: Range = (-500.0, 500.0)     # сдвиг XY
     world_z_offset_m: Range = (-50.0, 150.0)    # абсолютная отметка пола
-    write_merged: bool = False                  # дополнительный E57 «одним сканом»
+    write_merged: bool = False                  # scan_merged.e57: одно сведённое облако, как
+    #                                             экспорт заказчика (станции - в позах снимков)
+    merged_spacing_mm: float = 0.0              # прореживание сведённого облака (0 - без)
     write_mesh: bool = False                    # mesh.ply с цветами классов
     unet_mask: bool = True                      # gt/unet_mask.png в формате datasetgen (ReFloorBRUSNIKA)
     unet_target_wall_px: float = 30.0           # наружная стена в px, как core/scale_norm.py

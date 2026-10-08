@@ -153,6 +153,14 @@ def free_space_input(stations: list[dict], frame: RasterFrame, n_bins: int = 720
         info.append({"floor_rel_m": round(fz, 3), "ceiling_rel_m": None if cz is None else round(cz, 3),
                      "bins_empty": int((rb <= 0).sum())})
     free = cv2.morphologyEx(free, cv2.MORPH_CLOSE, _disk(0.03 / px))      # щели между секторами
+    return _compose(free, window, px, close_m, ext_wall_m, info)
+
+
+def _compose(free, window, px: float, close_m: float, ext_wall_m: float, info) -> dict:
+    """Свободное пространство -> здание, стены, кольцо наружных стен, «неизвестно», вход."""
+    import cv2
+
+    H, W = free.shape
     building = cv2.morphologyEx(free, cv2.MORPH_CLOSE, _disk(close_m / 2 / px))
     # дыры, которые закрытие не залило (шире close_m) - «неизвестно»
     n, lab, stats, _ = cv2.connectedComponentsWithStats((building == 0).astype(np.uint8), 4)
@@ -175,6 +183,39 @@ def free_space_input(stations: list[dict], frame: RasterFrame, n_bins: int = 720
     return {"image": img, "free": free.astype(bool), "walls": walls.astype(bool),
             "window": win, "unknown": unknown.astype(bool), "valid": valid.astype(bool),
             "stations": info}
+
+
+def floor_ceiling(z: np.ndarray) -> tuple[float | None, float | None]:
+    """Пол и потолок сведённого облака: пики гистограммы z в нижней и верхней трети."""
+    if len(z) < 1000:
+        return None, None
+    lo, hi = np.percentile(z, 0.5), np.percentile(z, 99.5)
+    h, e = np.histogram(z, bins=np.arange(lo, hi + 0.01, 0.01))
+    c = (e[:-1] + e[1:]) / 2
+    third = (hi - lo) / 3
+    fl = c[c < lo + third][h[c < lo + third].argmax()]
+    ce = c[c > hi - third][h[c > hi - third].argmax()]
+    return float(fl), float(ce)
+
+
+def coverage_input(points: np.ndarray, frame: RasterFrame, floor_z: float, ceil_z: float,
+                   band: float = 0.04, close_m: float = 0.6, ext_wall_m: float = 0.4) -> dict:
+    """Вход сети для сведённого облака (одно облако без станций и сетки, как экспорт
+    Cyclone REGISTER 360): свободно - где есть точки пола или потолка. Потолок виден почти
+    везде (мебель его не закрывает), над стенами и в толще перегородок точек потолка нет -
+    там и получаются стены; пол добавляет дверные проёмы (под перемычкой потолка нет)."""
+    import cv2
+
+    H, W = frame.height, frame.width
+    sel = (np.abs(points[:, 2] - floor_z) < band) | (np.abs(points[:, 2] - ceil_z) < band)
+    i, j = frame.xy_to_ij(points[sel, 0], points[sel, 1])
+    i, j = np.round(i).astype(int), np.round(j).astype(int)
+    ok = (i >= 0) & (i < H) & (j >= 0) & (j < W)
+    free = np.zeros((H, W), np.uint8)
+    free[i[ok], j[ok]] = 1
+    free = cv2.morphologyEx(free, cv2.MORPH_CLOSE, _disk(max(2.0, 0.03 / frame.pixel_m)))
+    info = [{"floor_z": round(floor_z, 3), "ceiling_z": round(ceil_z, 3)}]
+    return _compose(free, np.zeros_like(free), frame.pixel_m, close_m, ext_wall_m, info)
 
 
 def load_stations(scene_dir: Path, world: WorldTransform, max_points: int = 3_000_000) -> list[dict]:
@@ -246,21 +287,28 @@ def make_pair(scene_dir, figure: bool = True) -> dict:
 # ----------------------------------------------------------------------
 
 def _slice_density(stations, frame: RasterFrame) -> np.ndarray:
-    import cv2
-
-    H, W = frame.height, frame.width
-    dens = np.zeros((H, W))
+    """Плотность точек полосы 1,0-1,6 м над полом станции (пол - пик гистограммы)."""
+    parts = []
     for st in stations:
         c, p = np.asarray(st["center"]), st["points"]
         fz = _plane_z(p[:, 2] - c[2], -2.5, -0.3)
         if fz is None:
             continue
         z = p[:, 2] - (c[2] + fz)
-        q = p[(z > 1.0) & (z < 1.6)]
-        i, j = frame.xy_to_ij(q[:, 0], q[:, 1])
-        i, j = np.round(i).astype(int), np.round(j).astype(int)
-        ok = (i >= 0) & (i < H) & (j >= 0) & (j < W)
-        np.add.at(dens, (i[ok], j[ok]), 1)
+        parts.append(p[(z > 1.0) & (z < 1.6)])
+    return density_image(np.concatenate(parts) if parts else np.zeros((0, 3)), frame)
+
+
+def density_image(q: np.ndarray, frame: RasterFrame) -> np.ndarray:
+    """Логарифм плотности точек в пикселях кадра, нормированный к 0..1."""
+    import cv2
+
+    H, W = frame.height, frame.width
+    dens = np.zeros((H, W))
+    i, j = frame.xy_to_ij(q[:, 0], q[:, 1])
+    i, j = np.round(i).astype(int), np.round(j).astype(int)
+    ok = (i >= 0) & (i < H) & (j >= 0) & (j < W)
+    np.add.at(dens, (i[ok], j[ok]), 1)
     dens = cv2.dilate(np.log1p(dens), np.ones((3, 3)))
     top = np.percentile(dens[dens > 0], 95) if (dens > 0).any() else 1.0
     return np.clip(dens / max(top, 1e-9), 0, 1)

@@ -64,3 +64,25 @@ def test_inspect_noise_estimate_is_unbiased(tmp_path):
     est = aggregate(rep)["noise_mm"][1][0]              # 2-4 м, 0-30°
     true = 1.0 * np.sqrt(0.5 / max(refl, 0.05))         # как в scanner.py
     assert abs(est / true - 1) < 0.2, (est, true)
+
+
+def test_inspect_unified_cloud(tmp_path):
+    """Сведённое облако (как у заказчика): станции из поз снимков, план по покрытию."""
+    import json
+
+    from simscan.generate import generate_scene
+    from simscan.inspect_e57 import inspect_e57
+
+    cfg = box_room_config(5.0, 3.0, layout={"source": "simscan"},
+                          scanner={"angular_step_deg": 0.25, "min_range_m": 0.3, "max_stations_per_room": 2,
+                                   "stations_per_m2": 0.5},
+                          export={"free_space_input": False, "write_merged": True, "merged_spacing_mm": 10.0})
+    generate_scene(cfg, tmp_path / "s", seed=0, index=0)
+    doc = json.loads((tmp_path / "s" / "layout.json").read_text())
+    rep = inspect_e57(tmp_path / "s" / "scan_merged.e57", tmp_path / "r", sample=False, log=lambda *a: None)
+    u = rep["unified"]
+    assert u["setups_from_images"] == len(doc["stations"]) >= 2
+    assert abs(u["ceiling_height_m"] - doc["ceiling_height"]) < 0.03
+    assert 5 < u["point_spacing_mm"] < 20
+    assert rep["plan"]["method"] == "coverage"
+    assert abs(rep["plan"]["free_area_m2"] - 15.0) < 1.5

@@ -139,7 +139,8 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
             v = scan.valid
             pts.append(scan.xyz_local[v] @ np.asarray(R).T + t)
             inten.append(scan.intensity[v])
-        write_merged_e57(out / "scan_merged.e57", np.vstack(pts), np.concatenate(inten))
+        write_merged_e57(out / "scan_merged.e57", np.vstack(pts), np.concatenate(inten),
+                         stations=[t for _, t in poses], spacing_m=ex.merged_spacing_mm / 1000)
 
     frame = frame_for(layout, ex.pixel_mm, ex.pad_m)
     masks = build_masks(layout, solids, frame, ex.cut_height_m)

@@ -295,6 +295,8 @@ def inspect_e57(path, out_dir, chunk: int = 2_000_000, keep_points: int = 1_500_
             t = np.asarray(h.translation, float) if h.translation is not None else np.zeros(3)
             # выборка на станцию - не больше общего бюджета / число станций (память не растёт)
             keep = min(keep_points, max(200_000, keep_total // max(len(e57.scans), 1)))
+            if len(e57.scans) == 1:                     # сведённое облако: плану нужна плотность
+                keep = keep_total
             st = ScanStats(n_pts, rows, cols, keep, keep_pairs, rng)
             t0 = time.perf_counter()
             for d in e57.iter_points(i, fields, chunk):
@@ -372,7 +374,16 @@ def inspect_e57(path, out_dir, chunk: int = 2_000_000, keep_points: int = 1_500_
     report["levelling"] = {"floor_z_std_mm": round(float(np.std(floors)) * 1000, 2) if floors else None,
                            "station_height_m": [s["floor_rel_m"] and round(-s["floor_rel_m"], 3)
                                                 for s in report["scans"]]}
-    plan = _plan(stations, out) if stations else None
+    # сведённое облако (Cyclone REGISTER 360 «unified»): один скан без сетки; станции -
+    # только в позах снимков. Лучи от станций восстановить нельзя - план по покрытию
+    img_st = _image_stations(tree)
+    unified = len(report["scans"]) == 1 and report["scans"][0]["grid_rows_cols"] is None \
+        and len(img_st) >= 2
+    if unified:
+        report["unified"] = _unified_info(stations[0]["points"], img_st, samples[0][0].p_keep)
+        plan = _plan_coverage(stations[0]["points"], report["unified"], img_st, out)
+    else:
+        plan = _plan(stations, out) if stations else None
     if plan:
         report["plan"] = plan["info"]
     if figures:
@@ -422,6 +433,62 @@ def _plan(stations, out: Path) -> dict | None:
                      "free_area_m2": round(free_m2, 2), "stations": res["stations"]}}
 
 
+def _image_stations(tree) -> np.ndarray:
+    """Положения станций по позам встроенных снимков (по 6 граней куба на станцию)."""
+    pos = set()
+    for im in tree.get("images2D", []) if isinstance(tree, dict) else []:
+        t = (im.get("pose") or {}).get("translation") if isinstance(im, dict) else None
+        if isinstance(t, dict):
+            pos.add(tuple(round(float(t.get(k, 0.0)), 3) for k in "xyz"))
+    return np.array(sorted(pos)) if pos else np.zeros((0, 3))
+
+
+def _unified_info(points: np.ndarray, img_st: np.ndarray, p_keep: float) -> dict:
+    from .rasterize import floor_ceiling
+
+    fl, ce = floor_ceiling(points[:, 2])
+    out = {"setups_from_images": int(len(img_st)), "floor_z": fl, "ceiling_z": ce}
+    if fl is None:
+        return out
+    out["ceiling_height_m"] = round(ce - fl, 3)
+    out["station_height_m"] = [round(float(z - fl), 3) for z in img_st[:, 2]]
+    # шаг точек по потолку: число точек / площадь покрытия (ячейки 5 см)
+    c = points[np.abs(points[:, 2] - ce) < 0.03]
+    if len(c) > 1000:
+        cells = np.unique(np.floor(c[:, :2] / 0.05).astype(np.int64), axis=0)
+        dens = len(c) / max(p_keep, 1e-9) / (len(cells) * 0.0025)
+        out["ceiling_points_per_m2"] = int(dens)
+        out["point_spacing_mm"] = round(1000 / math.sqrt(dens), 1)
+        # шероховатость потолка: СКО по z в ячейках 10 см (шум + неровность при нормальном падении)
+        key = np.floor(c[:, :2] / 0.1).astype(np.int64)
+        _, inv, cnt = np.unique(key, axis=0, return_inverse=True, return_counts=True)
+        mean = np.bincount(inv, c[:, 2]) / cnt
+        r = c[:, 2] - mean[inv]
+        ok = cnt[inv] >= 5
+        out["ceiling_roughness_mm"] = round(float(np.std(r[ok]) * 1000), 2) if ok.any() else None
+    return out
+
+
+def _plan_coverage(points, uinfo, img_st, out: Path) -> dict | None:
+    import cv2
+
+    from .groundtruth import RasterFrame
+    from .rasterize import coverage_input
+
+    if uinfo.get("floor_z") is None:
+        return None
+    lo = np.percentile(points[:, :2], 0.5, axis=0) - 1.0
+    hi = np.percentile(points[:, :2], 99.5, axis=0) + 1.0
+    px = max(0.01, float((hi - lo).max()) / 2048)
+    w, h = int(math.ceil((hi[0] - lo[0]) / px)), int(math.ceil((hi[1] - lo[1]) / px))
+    frame = RasterFrame(float(lo[0]), float(lo[1]), px, w, h)
+    res = coverage_input(points, frame, uinfo["floor_z"], uinfo["ceiling_z"])
+    cv2.imwrite(str(out / "input.png"), res["image"])
+    return {"frame": frame, "res": res, "markers": img_st, "floor_z": uinfo["floor_z"],
+            "info": {"method": "coverage", "pixel_mm": round(px * 1000, 2), "size_px": [h, w],
+                     "free_area_m2": round(float(res["free"].sum()) * px * px, 2)}}
+
+
 def _write_sample(stations, samples, path: Path, voxel: float, per_scan: int, rng) -> None:
     xs, its, sid = [], [], []
     for k, (s, (_, inten)) in enumerate(zip(stations, samples)):
@@ -465,13 +532,22 @@ def _figures(report, stations, samples, plan, out: Path) -> None:
         from .rasterize import _slice_density
 
         fr, res = plan["frame"], plan["res"]
-        dens = _slice_density(stations, fr)
+        markers = plan.get("markers")
+        if markers is None:
+            markers = np.array([s["center"] for s in stations])
+            dens = _slice_density(stations, fr)
+        else:                                           # сведённое облако: срез от общего пола
+            from .rasterize import density_image
+
+            p = stations[0]["points"]
+            z = p[:, 2] - plan["floor_z"]
+            dens = density_image(p[(z > 1.0) & (z < 1.6)], fr)
         fig, axes = plt.subplots(1, 2, figsize=(14, 7.2))
         axes[0].imshow(1 - dens * 0.85, cmap="gray", vmin=0, vmax=1, interpolation="antialiased")
         axes[1].imshow(res["image"], cmap="gray", vmin=0, vmax=255, interpolation="antialiased")
         for ax, title in zip(axes, ("Срез 1,0–1,6 м", "Вход")):
-            for k, s in enumerate(stations):
-                i, j = fr.xy_to_ij(s["center"][0], s["center"][1])
+            for k, c in enumerate(markers):
+                i, j = fr.xy_to_ij(c[0], c[1])
                 ax.plot(j, i, "o", ms=5, mfc="white", mec=INK, mew=1)
                 ax.annotate(str(k + 1), (j, i), xytext=(4, 4), textcoords="offset points",
                             fontsize=8, color=INK2)

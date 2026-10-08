@@ -58,23 +58,50 @@ def write_e57(path: str | Path, scans: list[ScanResult], poses: list[tuple[np.nd
     return masks
 
 
-def write_merged_e57(path: str | Path, points_world: np.ndarray, intensity: np.ndarray) -> None:
-    """Слитое облако одним сканом (как «экспорт без станций»).
+def write_merged_e57(path: str | Path, points_world: np.ndarray, intensity: np.ndarray,
+                     stations=None, spacing_m: float = 0.0) -> None:
+    """Слитое облако одним сканом - как экспорт Cyclone REGISTER 360 у заказчика:
+    один скан без сетки строк и столбцов, станции - только в позах снимков (images2D).
 
-    Точки пишутся относительно округлённого центра, центр - в перенос позы:
-    глобальные координаты в float32 потеряли бы миллиметры уже на сотнях метров.
+    spacing_m > 0 - прореживание по вокселам (одна точка на воксел), как фильтр
+    «расстояние между точками» при экспорте. Точки пишутся относительно округлённого
+    центра, центр - в перенос позы: в float32 глобальные координаты потеряли бы миллиметры.
     """
     import pye57
+    from pye57 import libe57
 
     path = Path(path)
     if path.exists():
         path.unlink()
+    if spacing_m > 0:
+        key = np.floor(points_world / spacing_m).astype(np.int64)
+        _, first = np.unique(key, axis=0, return_index=True)
+        first.sort()
+        points_world, intensity = points_world[first], intensity[first]
     shift = np.round(points_world.mean(0), 0)
     local = points_world - shift
     with pye57.E57(str(path), mode="w") as e57:
         e57.write_scan_raw({"cartesianX": local[:, 0], "cartesianY": local[:, 1],
                             "cartesianZ": local[:, 2], "intensity": intensity},
                            name="merged", rotation=np.array([1.0, 0, 0, 0]), translation=shift)
+        imf = e57.image_file
+        images = e57.root["images2D"]
+        images = libe57.VectorNode(images) if not isinstance(images, libe57.VectorNode) else images
+        for k, c in enumerate(stations if stations is not None else []):
+            img = libe57.StructureNode(imf)
+            img.set("guid", libe57.StringNode(imf, f"station-{k + 1}"))
+            img.set("name", libe57.StringNode(imf, f"Setup {k + 1}"))
+            pose = libe57.StructureNode(imf)
+            rot = libe57.StructureNode(imf)
+            for key_, v in zip("wxyz", (1.0, 0.0, 0.0, 0.0)):
+                rot.set(key_, libe57.FloatNode(imf, v))
+            tr = libe57.StructureNode(imf)
+            for key_, v in zip("xyz", np.asarray(c, float)):
+                tr.set(key_, libe57.FloatNode(imf, float(v)))
+            pose.set("rotation", rot)
+            pose.set("translation", tr)
+            img.set("pose", pose)
+            images.append(img)
 
 
 def read_e57_world(path: str | Path) -> list[dict]:
