@@ -198,6 +198,54 @@ def floor_ceiling(z: np.ndarray) -> tuple[float | None, float | None]:
     return float(fl), float(ce)
 
 
+def detect_levels(points: np.ndarray, min_share: float = 0.25, min_height: float = 2.0,
+                  max_height: float = 4.5) -> list[dict]:
+    """Уровни сведённого облака: пары (пол, потолок) из горизонтальных плоскостей.
+
+    Плоскость - пик гистограммы z (шаг 2 см), площадь - по ячейкам 25 см. Берутся пики
+    с площадью не меньше min_share от наибольшей, пики ближе 10 см сливаются. Снизу вверх:
+    пол, затем наибольшая плоскость выше на min_height..max_height - потолок; следующая
+    плоскость над потолком - пол следующего уровня (перекрытие)."""
+    z = points[:, 2]
+    if len(z) < 1000:
+        return []
+    # запас по краям: пол бывает самыми нижними точками облака, потолок - самыми верхними
+    h, e = np.histogram(z, bins=np.arange(z.min() - 0.1, z.max() + 0.12, 0.02))
+    c = (e[:-1] + e[1:]) / 2
+    peaks = [i for i in range(1, len(h) - 1) if h[i] >= h[i - 1] and h[i] >= h[i + 1]
+             and h[i] > 3 * np.median(h)]
+    planes = []
+    for i in peaks:
+        m = np.abs(z - c[i]) < 0.03
+        cells = np.unique(np.floor(points[m, :2] / 0.25).astype(np.int64), axis=0)
+        planes.append({"z": float(c[i]), "area": len(cells) * 0.0625, "n": int(h[i])})
+    if not planes:
+        return []
+    top = max(p["area"] for p in planes)
+    planes = [p for p in planes if p["area"] >= min_share * top]
+    merged = []
+    for p in sorted(planes, key=lambda p: p["z"]):
+        if merged and p["z"] - merged[-1]["z"] < 0.1:
+            if p["n"] > merged[-1]["n"]:
+                merged[-1] = p
+            continue
+        merged.append(p)
+    levels, k = [], 0
+    while k < len(merged) - 1:
+        fl = merged[k]
+        cand = [q for q in merged[k + 1:] if min_height <= q["z"] - fl["z"] <= max_height]
+        # потолок - самая большая плоскость в диапазоне высот (не ближайшая: короба, верх проёмов)
+        ce = max(cand, key=lambda q: q["area"]) if cand else None
+        if ce is None:
+            k += 1
+            continue
+        levels.append({"floor_z": round(fl["z"], 3), "ceiling_z": round(ce["z"], 3),
+                       "height_m": round(ce["z"] - fl["z"], 3),
+                       "floor_area_m2": round(fl["area"], 1)})
+        k = merged.index(ce) + 1
+    return levels
+
+
 def coverage_input(points: np.ndarray, frame: RasterFrame, floor_z: float, ceil_z: float,
                    band: float = 0.04, close_m: float = 0.6, ext_wall_m: float = 0.4,
                    spacing_m: float = 0.015) -> dict:

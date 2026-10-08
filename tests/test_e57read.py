@@ -86,3 +86,22 @@ def test_inspect_unified_cloud(tmp_path):
     assert 5 < u["point_spacing_mm"] < 20
     assert rep["plan"]["method"] == "coverage"
     assert abs(rep["plan"]["free_area_m2"] - 15.0) < 1.5
+
+
+def test_detect_levels_two_storeys():
+    """Двухэтажная квартира: пол, короб, потолок, перекрытие, пол, потолок."""
+    from simscan.rasterize import detect_levels
+
+    rng = np.random.default_rng(0)
+
+    def plane(z, x1, n):
+        return np.c_[rng.uniform(0, x1, n), rng.uniform(0, 8, n), z + rng.normal(0, 0.002, n)]
+
+    walls = np.c_[rng.uniform(0, 10, 40_000), rng.choice([0.0, 8.0], 40_000), rng.uniform(0, 5.7, 40_000)]
+    pts = np.vstack([plane(0.0, 10, 30_000), plane(2.2, 3, 8_000),      # пол и короб 2,2 м
+                     plane(2.7, 10, 30_000), plane(2.94, 8, 25_000),   # потолок и пол 2-го уровня
+                     plane(5.7, 8, 25_000), walls])
+    lv = detect_levels(pts)
+    assert len(lv) == 2
+    assert abs(lv[0]["floor_z"]) < 0.03 and abs(lv[0]["ceiling_z"] - 2.7) < 0.03
+    assert abs(lv[1]["floor_z"] - 2.94) < 0.03 and abs(lv[1]["ceiling_z"] - 5.7) < 0.03

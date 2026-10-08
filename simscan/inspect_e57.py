@@ -444,16 +444,26 @@ def _image_stations(tree) -> np.ndarray:
 
 
 def _unified_info(points: np.ndarray, img_st: np.ndarray, p_keep: float) -> dict:
-    from .rasterize import floor_ceiling
+    from .rasterize import detect_levels, floor_ceiling
 
-    fl, ce = floor_ceiling(points[:, 2])
-    out = {"setups_from_images": int(len(img_st)), "floor_z": fl, "ceiling_z": ce,
+    levels = detect_levels(points)
+    if levels:
+        fl, ce = levels[0]["floor_z"], levels[0]["ceiling_z"]
+    else:
+        fl, ce = floor_ceiling(points[:, 2])
+    # у некоторых экспортов позы снимков - поза всего облака, а не станций (все в одной точке)
+    spread = float(np.ptp(img_st[:, :2], axis=0).max()) if len(img_st) else 0.0
+    stations_known = len(img_st) >= 2 and spread > 0.3
+    out = {"setups_from_images": int(len(img_st)) if stations_known else None,
+           "image_poses_spread_m": round(spread, 3),
+           "levels": levels, "floor_z": fl, "ceiling_z": ce,
            "sample_fraction": round(float(min(p_keep, 1.0)), 4)}
     if fl is None:
         return out
     out["ceiling_height_m"] = round(ce - fl, 3)
-    out["station_height_m"] = [round(float(z - fl), 3) for z in img_st[:, 2]]
-    # шаг точек по потолку: число точек / площадь покрытия (ячейки 5 см)
+    if stations_known:
+        out["station_height_m"] = [round(float(z - fl), 3) for z in img_st[:, 2]]
+    # шаг точек по потолку нижнего уровня: число точек / площадь покрытия (ячейки 5 см)
     c = points[np.abs(points[:, 2] - ce) < 0.03]
     if len(c) > 1000:
         cells = np.unique(np.floor(c[:, :2] / 0.05).astype(np.int64), axis=0)
@@ -471,12 +481,16 @@ def _unified_info(points: np.ndarray, img_st: np.ndarray, p_keep: float) -> dict
 
 
 def _plan_coverage(points, uinfo, img_st, out: Path) -> dict | None:
+    """План по покрытию - на каждый уровень свой (input_L1.png, input_L2.png ...);
+    в общий отчёт идёт нижний уровень."""
     import cv2
 
     from .groundtruth import RasterFrame
     from .rasterize import coverage_input
 
-    if uinfo.get("floor_z") is None:
+    levels = uinfo.get("levels") or ([{"floor_z": uinfo["floor_z"], "ceiling_z": uinfo["ceiling_z"]}]
+                                     if uinfo.get("floor_z") is not None else [])
+    if not levels:
         return None
     lo = np.percentile(points[:, :2], 0.5, axis=0) - 1.0
     hi = np.percentile(points[:, :2], 99.5, axis=0) + 1.0
@@ -486,11 +500,21 @@ def _plan_coverage(points, uinfo, img_st, out: Path) -> dict | None:
     spacing = (uinfo.get("point_spacing_mm") or 15.0) / 1000
     # в выборке точек меньше, чем в файле: шаг выборки больше в 1/sqrt(доли) раз
     spacing *= 1 / math.sqrt(max(uinfo.get("sample_fraction", 1.0), 1e-6))
-    res = coverage_input(points, frame, uinfo["floor_z"], uinfo["ceiling_z"], spacing_m=spacing)
-    cv2.imwrite(str(out / "input.png"), res["image"])
-    return {"frame": frame, "res": res, "markers": img_st, "floor_z": uinfo["floor_z"],
-            "info": {"method": "coverage", "pixel_mm": round(px * 1000, 2), "size_px": [h, w],
-                     "free_area_m2": round(float(res["free"].sum()) * px * px, 2)}}
+    markers = img_st if uinfo.get("setups_from_images") else np.zeros((0, 3))
+    plans = []
+    for k, lv in enumerate(levels):
+        m = (points[:, 2] > lv["floor_z"] - 0.1) & (points[:, 2] < lv["ceiling_z"] + 0.1)
+        res = coverage_input(points[m], frame, lv["floor_z"], lv["ceiling_z"], spacing_m=spacing)
+        name = "input.png" if len(levels) == 1 else f"input_L{k + 1}.png"
+        cv2.imwrite(str(out / name), res["image"])
+        lv["free_area_m2"] = round(float(res["free"].sum()) * px * px, 2)
+        plans.append({"frame": frame, "res": res, "markers": markers, "floor_z": lv["floor_z"],
+                      "level": k + 1})
+    first = dict(plans[0])
+    first["levels"] = plans
+    first["info"] = {"method": "coverage", "pixel_mm": round(px * 1000, 2), "size_px": [h, w],
+                     "levels": len(levels), "free_area_m2": levels[0]["free_area_m2"]}
+    return first
 
 
 def _write_sample(stations, samples, path: Path, voxel: float, per_scan: int, rng) -> None:
@@ -531,36 +555,37 @@ def _figures(report, stations, samples, plan, out: Path) -> None:
     from .debug import AQUA, BLUE, INK, INK2, ORANGE, RED, SURFACE, YELLOW, _plt
 
     plt = _plt()
-    # план: срез и вход
+    # план: строка на уровень, срез | вход
     if plan:
-        from .rasterize import _slice_density
+        from .rasterize import _slice_density, density_image
 
-        fr, res = plan["frame"], plan["res"]
-        markers = plan.get("markers")
-        if markers is None:
-            markers = np.array([s["center"] for s in stations])
-            dens = _slice_density(stations, fr)
-        else:                                           # сведённое облако: срез от общего пола
-            from .rasterize import density_image
-
-            p = stations[0]["points"]
-            z = p[:, 2] - plan["floor_z"]
-            dens = density_image(p[(z > 1.0) & (z < 1.6)], fr)
-        fig, axes = plt.subplots(1, 2, figsize=(14, 7.2))
-        axes[0].imshow(1 - dens * 0.85, cmap="gray", vmin=0, vmax=1, interpolation="antialiased")
-        axes[1].imshow(res["image"], cmap="gray", vmin=0, vmax=255, interpolation="antialiased")
-        for ax, title in zip(axes, ("Срез 1,0–1,6 м", "Вход")):
-            for k, c in enumerate(markers):
-                i, j = fr.xy_to_ij(c[0], c[1])
-                ax.plot(j, i, "o", ms=5, mfc="white", mec=INK, mew=1)
-                ax.annotate(str(k + 1), (j, i), xytext=(4, 4), textcoords="offset points",
-                            fontsize=8, color=INK2)
-            ax.set_title(title)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax.grid(False)
-            for sp in ax.spines.values():
-                sp.set_visible(False)
+        rows = plan.get("levels") or [plan]
+        fig, axes = plt.subplots(len(rows), 2, figsize=(14, 6.4 * len(rows) + 0.4), squeeze=False)
+        for r, pl in enumerate(rows):
+            fr, res = pl["frame"], pl["res"]
+            markers = pl.get("markers")
+            if markers is None:
+                markers = np.array([s["center"] for s in stations])
+                dens = _slice_density(stations, fr)
+            else:                                       # сведённое облако: срез от пола уровня
+                p = stations[0]["points"]
+                z = p[:, 2] - pl["floor_z"]
+                dens = density_image(p[(z > 1.0) & (z < 1.6)], fr)
+            prefix = f"Уровень {pl['level']}: " if len(rows) > 1 else ""
+            for ax, img, vmax, title in ((axes[r, 0], 1 - dens * 0.85, 1, prefix + "срез 1,0–1,6 м"),
+                                         (axes[r, 1], res["image"], 255, "Вход")):
+                ax.imshow(img, cmap="gray", vmin=0, vmax=vmax, interpolation="antialiased")
+                for k, c in enumerate(markers):
+                    i, j = fr.xy_to_ij(c[0], c[1])
+                    ax.plot(j, i, "o", ms=5, mfc="white", mec=INK, mew=1)
+                    ax.annotate(str(k + 1), (j, i), xytext=(4, 4), textcoords="offset points",
+                                fontsize=8, color=INK2)
+                ax.set_title(title)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.grid(False)
+                for sp in ax.spines.values():
+                    sp.set_visible(False)
         fig.tight_layout()
         fig.savefig(out / "plan.png", dpi=90)
         plt.close(fig)
