@@ -58,11 +58,14 @@ def _frame(path, px: float, chunk: int, sample_points: int, log):
     if not levels:
         fl, ce = floor_ceiling(sample[:, 2])
         levels = [{"floor_z": fl, "ceiling_z": ce, "height_m": ce - fl}]
+    from .netinput import frame_points
+
     hz = sample[:, 2] - levels[0]["floor_z"]
-    angle = dominant_angle(sample[(hz > 1.0) & (hz < 1.8), :2])
+    near = frame_points(sample, levels, st)
+    angle = dominant_angle(sample[near & (hz > 1.0) & (hz < 1.8), :2])
     c, s_ = math.cos(math.radians(-angle)), math.sin(math.radians(-angle))
     rot = np.array([[c, -s_], [s_, c]])
-    q = sample[:, :2] @ rot.T
+    q = sample[near, :2] @ rot.T
     lo = np.percentile(q, 0.2, axis=0) - 0.5
     hi = np.percentile(q, 99.8, axis=0) + 0.5
     px = max(px, float((hi - lo).max()) / 8000)

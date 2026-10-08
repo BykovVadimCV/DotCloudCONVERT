@@ -118,6 +118,21 @@ def station_positions(reader) -> np.ndarray:
     return st
 
 
+def frame_points(points: np.ndarray, levels: list, stations: np.ndarray, reach_m: float = 20.0) -> np.ndarray:
+    """Точки, по которым строится кадр: в пределах высот уровней (грунт под окнами - нет) и не
+    дальше reach_m от стоянок (соседние дома через окна - нет)."""
+    z = points[:, 2]
+    m = np.zeros(len(points), bool)
+    for lv in levels:
+        m |= (z > lv["floor_z"] - 0.1) & (z < lv["ceiling_z"] + 0.1)
+    if len(stations):
+        d = np.full(len(points), np.inf)
+        for sx, sy, _ in stations:
+            d = np.minimum(d, np.hypot(points[:, 0] - sx, points[:, 1] - sy))
+        m &= d < reach_m
+    return m if m.sum() > 100 else np.ones(len(points), bool)
+
+
 def rasterize_e57(path, px: float = PIXEL_M, levels: list | None = None, thin: float = 0.0,
                   z_shift: float = 0.0, seed: int = 0, chunk: int = 2_000_000,
                   sample_points: int = 3_000_000, log=print) -> list[dict]:
@@ -138,16 +153,17 @@ def rasterize_e57(path, px: float = PIXEL_M, levels: list | None = None, thin: f
                 sample.append(p[rng.random(len(p)) < p_keep].astype(np.float32))
         sample = np.concatenate(sample).astype(float)
         sample[:, 2] += z_shift
+        st = station_positions(r)
         if levels is None:
-            levels = detect_levels(sample, stations_z=station_positions(r)[:, 2] + z_shift)
+            levels = detect_levels(sample, stations_z=st[:, 2] + z_shift)
             if not levels:
                 fl, ce = floor_ceiling(sample[:, 2])
                 levels = [{"floor_z": fl, "ceiling_z": ce, "height_m": ce - fl}]
         acc = []
         for lv in levels:
             top = lv["ceiling_z"] - lv["floor_z"]
-            m = (sample[:, 2] > lv["floor_z"] - 0.1) & (sample[:, 2] < lv["ceiling_z"] + 0.1)
-            fr = _frame_from_points(sample[m, :2] if m.sum() > 100 else sample[:, :2], px)
+            m = frame_points(sample, [lv], st)
+            fr = _frame_from_points(sample[m, :2], px)
             H, W = fr["height"], fr["width"]
             nz = max(1, int(math.floor((top - 2 * BAND_MARGIN_M) / Z_BIN_M)))
             acc.append({"level": lv, "frame": fr, "nz": nz, "top": top,
