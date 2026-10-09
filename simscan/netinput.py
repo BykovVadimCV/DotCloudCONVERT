@@ -157,20 +157,28 @@ class E57Source:
 
 class MemorySource:
     """Те же точки, что легли бы в scan.e57, без записи на диск: локальные координаты станции
-    в float32 (как E57_SINGLE) и записанная поза (с ошибкой регистрации)."""
+    в float32 (как E57_SINGLE) и записанная поза (с ошибкой регистрации). Мировые координаты
+    считаются один раз и хранятся (float32 от центра стоянок, 12 байт на точку) - для
+    нескольких растров скана; от растра из файла отличаются долями пикселя на границах ячеек
+    (округление до микрометров)."""
 
     def __init__(self, scans, poses, chunk: int = 2_000_000):
-        self.scans, self.poses, self.chunk = scans, poses, chunk
-        self.total = int(sum(int(s.valid.sum()) for s in scans))
+        self.chunk = chunk
+        # float32 - относительно центра стоянок (мировые координаты до сотен метров
+        # в float32 потеряли бы доли миллиметра)
+        self.center = np.mean([np.asarray(t, float) for _, t in poses], axis=0) if poses else np.zeros(3)
+        parts = []
+        for s_, (R, t) in zip(scans, poses):
+            xyz = s_.xyz_local[s_.valid].astype(np.float32).astype(float)
+            parts.append((xyz @ np.asarray(R, float).T + (np.asarray(t, float) - self.center)).astype(np.float32))
+        self.points = np.concatenate(parts) if parts else np.zeros((0, 3), np.float32)
+        self.total = len(self.points)
         st = np.array([np.asarray(t, float) for _, t in poses]).reshape(-1, 3)
         self.stations = st if len(st) >= 2 and float(np.ptp(st[:, :2], axis=0).max()) >= 0.3 else np.zeros((0, 3))
 
     def chunks(self):
-        for s, (R, t) in zip(self.scans, self.poses):
-            xyz = s.xyz_local[s.valid]
-            R, t = np.asarray(R, float), np.asarray(t, float)
-            for a in range(0, len(xyz), self.chunk):
-                yield xyz[a:a + self.chunk].astype(np.float32).astype(float) @ R.T + t
+        for a in range(0, self.total, self.chunk):
+            yield self.points[a:a + self.chunk].astype(float) + self.center
 
     def close(self):
         pass

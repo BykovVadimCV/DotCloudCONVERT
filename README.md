@@ -335,7 +335,7 @@ python -m simscan dataset real D:/scans/kvartira.e57 --out dataset              
 
 ```bash
 # на машине с ядрами: сцена -> растр -> скан удаляется (~5 МБ на уровень вместо ~0,5 ГБ)
-python -m simscan make-dataset --config configs/customer_like.yaml --count 3000 --workers 16 --out dataset
+python -m simscan make-dataset --config configs/customer_like.yaml --count 1000 --variants 3 --workers 16 --out dataset
 python -m simscan dataset pack dataset --out dataset.zip         # один архив для Google Drive
 # несколько машин: одинаковый --seed, разные --start; потом слить scenes/ и
 python -m simscan dataset splits dataset
@@ -346,7 +346,10 @@ python -m simscan train --data dataset --out runs/r1 --epochs 60 --batch 8 [--re
 python -m simscan infer runs/r1/best.pt kvartira.e57 --out pred
 ```
 
-`make-dataset` продолжает с места обрыва. Двухуровневые квартиры (`layout.p_duplex`,
+`make-dataset` продолжает с места обрыва. Скан на диск не пишется: растр строится из памяти теми же
+точками, что легли бы в scan.e57 (`MemorySource`; `--keep-scans` - через файл). `--variants N` -
+N растров одного скана (первый как есть, остальные с поворотом облака на случайный угол и
+прореживанием; разметка поворачивается вместе с облаком): растр стоит ~5 с против ~45 с симуляции. Двухуровневые квартиры (`layout.p_duplex`,
 `simscan/duplex.py`): верхний этаж над нижним с теми же наружными стенами и окнами, своей
 высотой потолка и обстановкой, без входной двери; прямой марш у глухой стены или винтовая
 лестница в углу, проём в плите, ограждение вокруг проёма; станции на обоих этажах, поэтому
