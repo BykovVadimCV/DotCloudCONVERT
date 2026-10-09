@@ -26,7 +26,7 @@ def _loaders(data, crop, batch, workers, seed):
     from .torchdata import torch_dataset
 
     tr = torch_dataset(data, "train", crop=crop, train=True, seed=seed)
-    va = torch_dataset(data, "val", crop=crop, train=False)
+    va = torch_dataset(data, "val", crop=None, train=False)          # val - уровни целиком
 
     def init(wid):                     # у каждого процесса загрузчика своя случайность аугментаций
         info = torch.utils.data.get_worker_info()
@@ -34,7 +34,7 @@ def _loaders(data, crop, batch, workers, seed):
 
     kw = dict(num_workers=workers, pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0)
     tl = DataLoader(tr, batch_size=batch, shuffle=True, drop_last=len(tr) > batch, worker_init_fn=init, **kw)
-    vl = DataLoader(va, batch_size=batch, shuffle=False, **kw)
+    vl = DataLoader(va, batch_size=1, shuffle=False, **kw)          # уровни разного размера
     return tl, vl
 
 
@@ -83,7 +83,9 @@ def train(data, out, epochs: int = 60, batch: int = 8, crop: int = 512, lr: floa
     model = PlanNet().to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     steps = epochs * max(len(tl), 1)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=steps, pct_start=0.05)
+    steps = max(steps, 10)                        # разогрев - хотя бы 2 шага (иначе деление на ноль)
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=steps,
+                                                pct_start=min(0.3, max(0.05, 2.5 / steps)))
     scaler = torch.amp.GradScaler(enabled=amp and dev.type == "cuda")
     cw = torch.tensor(CLASS_WEIGHTS, device=dev)
     start, best = 0, -1.0
