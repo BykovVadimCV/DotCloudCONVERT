@@ -26,34 +26,50 @@ import numpy as np
 from .config import SynthConfig
 
 
-def _done(root: Path, scene_id: str) -> bool:
-    return (root / "scenes" / scene_id / "L1" / "scene.json").exists()
+def _vid(k: int) -> str:
+    return "" if k == 0 else f"_v{k}"
 
 
-def _aug(seed: int, index: int, p_thin: float, p_shift: float) -> tuple[float, float]:
-    rng = np.random.default_rng([seed, index, 7])
-    thin = float(rng.uniform(0.2, 0.6)) if rng.random() < p_thin else 0.0
+def _done(root: Path, scene_id: str, variants: int = 1) -> bool:
+    return (root / "scenes" / (scene_id + _vid(variants - 1)) / "L1" / "scene.json").exists()
+
+
+def _aug(seed: int, index: int, k: int, p_thin: float, p_shift: float) -> dict:
+    """Аугментации облака для k-го растра скана: k = 0 - как есть (кроме доли сцен с
+    прореживанием и сдвигом пола), k > 0 - всегда поворот на случайный угол и прореживание."""
+    rng = np.random.default_rng([seed, index, 7, k])
+    thin = float(rng.uniform(0.2, 0.6)) if (k > 0 or rng.random() < p_thin) else 0.0
     z_shift = float(rng.normal(0, 0.01)) if rng.random() < p_shift else 0.0
-    return round(thin, 3), round(z_shift, 4)
+    rot = float(rng.uniform(0, 360)) if k > 0 else 0.0
+    return {"thin": round(thin, 3), "z_shift": round(z_shift, 4), "rot_deg": round(rot, 2)}
 
 
 def _one(args) -> dict:
-    cfg, root, work, seed, index, keep_scan, p_thin, p_shift = args
+    cfg, root, work, seed, index, keep_scan, p_thin, p_shift, variants = args
     from .generate import generate_scene
-    from .netinput import build_scene
+    from .netinput import E57Source, MemorySource, build_scene
 
     scene_id = f"scene_{index:05d}"
     tmp = Path(work) / scene_id
     t0 = time.time()
     try:
         shutil.rmtree(tmp, ignore_errors=True)
-        r = generate_scene(cfg, tmp, seed, index)
+        # скан не пишется на диск (~0,5-1 ГБ записи и чтения на сцену): растр - из памяти,
+        # теми же точками, что легли бы в scan.e57; --keep-scans - по-старому, через файл
+        r = generate_scene(cfg, tmp, seed, index, write_scan=keep_scan)
         if isinstance(r, dict) and r.get("error"):
             raise RuntimeError(r["error"])
-        thin, z_shift = _aug(seed, index, p_thin, p_shift)
-        dirs = build_scene(tmp, root, thin=thin, z_shift=z_shift, splits=False, log=lambda *a, **k: None)
+        t_gen = time.time() - t0
+        src = E57Source(tmp / "scan.e57") if keep_scan else MemorySource(*r.pop("_scans"))
+        dirs = []
+        try:
+            for k in range(variants):
+                dirs += build_scene(tmp, root, splits=False, source=src, variant=_vid(k),
+                                    log=lambda *a, **kw: None, **_aug(seed, index, k, p_thin, p_shift))
+        finally:
+            src.close()
         return {"scene": scene_id, "levels": [str(Path(d).relative_to(Path(root) / "scenes")) for d in dirs],
-                "s": round(time.time() - t0, 1)}
+                "s": round(time.time() - t0, 1), "s_gen": round(t_gen, 1)}
     except Exception as exc:  # одна плохая сцена не роняет набор
         return {"scene": scene_id, "error": f"{type(exc).__name__}: {exc}", "s": round(time.time() - t0, 1)}
     finally:
@@ -78,7 +94,9 @@ def rebuild_splits(root) -> dict:
 
 def make_dataset(cfg: SynthConfig, out_root, count: int, seed: int = 0, start: int = 0, workers: int = 1,
                  work_dir=None, keep_scans: bool = False, p_thin: float = 0.3, p_shift: float = 0.5,
-                 log=print) -> dict:
+                 variants: int = 1, log=print) -> dict:
+    """variants - растров на один скан: первый как есть, остальные с поворотом облака на
+    случайный угол и прореживанием (растр стоит ~5-10 с против ~45 с симуляции скана)."""
     from .netinput import write_meta
 
     root = Path(out_root)
@@ -88,9 +106,9 @@ def make_dataset(cfg: SynthConfig, out_root, count: int, seed: int = 0, start: i
     cfg.export.write_mesh = False
     work = Path(work_dir) if work_dir else root / "_work"
     work.mkdir(parents=True, exist_ok=True)
-    todo = [i for i in range(start, start + count) if not _done(root, f"scene_{i:05d}")]
+    todo = [i for i in range(start, start + count) if not _done(root, f"scene_{i:05d}", variants)]
     log(f"сцен {count}, готово {count - len(todo)}, осталось {len(todo)}")
-    jobs = [(cfg, str(root), str(work), seed, i, keep_scans, p_thin, p_shift) for i in todo]
+    jobs = [(cfg, str(root), str(work), seed, i, keep_scans, p_thin, p_shift, variants) for i in todo]
     ok = err = 0
     t0 = time.time()
     with open(root / "make_log.jsonl", "a", encoding="utf-8") as flog:

@@ -72,7 +72,9 @@ def main(argv: list[str] | None = None) -> None:
     md.add_argument("--start", type=int, default=0, help="номер первой сцены (разные машины - разные диапазоны)")
     md.add_argument("--workers", type=int, default=1)
     md.add_argument("--work-dir", help="временный каталог сканов (по умолчанию <out>/_work)")
-    md.add_argument("--keep-scans", action="store_true", help="не удалять сцены генератора")
+    md.add_argument("--keep-scans", action="store_true", help="писать scan.e57 и не удалять сцены (медленнее)")
+    md.add_argument("--variants", type=int, default=1,
+                    help="растров на скан: 2-3 - дешёвая аугментация (поворот облака, прореживание)")
     md.add_argument("--config")
     md.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     tr = sub.add_parser("train", help="обучить сеть плана на датасете (нужен torch)")
@@ -197,7 +199,7 @@ def main(argv: list[str] | None = None) -> None:
 
         cfg = load_config(args.config, _parse_set(args.set))
         make_dataset(cfg, args.out, args.count, args.seed, args.start, args.workers, work_dir=args.work_dir,
-                     keep_scans=args.keep_scans)
+                     keep_scans=args.keep_scans, variants=args.variants)
         return
     if args.cmd == "dataset":
         from .makedata import pack, rebuild_splits

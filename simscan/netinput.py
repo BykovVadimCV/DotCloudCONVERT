@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import hashlib
+import zlib
 import json
 import math
 from pathlib import Path
@@ -133,67 +134,127 @@ def frame_points(points: np.ndarray, levels: list, stations: np.ndarray, reach_m
     return m if m.sum() > 100 else np.ones(len(points), bool)
 
 
+class E57Source:
+    """Точки E57 (по станциям или сведённый) чанками в мировой СК + стоянки."""
+
+    def __init__(self, path, chunk: int = 2_000_000):
+        from .e57read import E57Reader
+
+        self.reader = E57Reader(path)
+        self.chunk = chunk
+        self.total = sum(s.points for s in self.reader.scans)
+        self.stations = station_positions(self.reader)
+
+    def chunks(self):
+        from .floorplan import _scan_points
+
+        for i in range(len(self.reader.scans)):
+            yield from _scan_points(self.reader, i, self.chunk)
+
+    def close(self):
+        self.reader.close()
+
+
+class MemorySource:
+    """Те же точки, что легли бы в scan.e57, без записи на диск: локальные координаты станции
+    в float32 (как E57_SINGLE) и записанная поза (с ошибкой регистрации)."""
+
+    def __init__(self, scans, poses, chunk: int = 2_000_000):
+        self.scans, self.poses, self.chunk = scans, poses, chunk
+        self.total = int(sum(int(s.valid.sum()) for s in scans))
+        st = np.array([np.asarray(t, float) for _, t in poses]).reshape(-1, 3)
+        self.stations = st if len(st) >= 2 and float(np.ptp(st[:, :2], axis=0).max()) >= 0.3 else np.zeros((0, 3))
+
+    def chunks(self):
+        for s, (R, t) in zip(self.scans, self.poses):
+            xyz = s.xyz_local[s.valid]
+            R, t = np.asarray(R, float), np.asarray(t, float)
+            for a in range(0, len(xyz), self.chunk):
+                yield xyz[a:a + self.chunk].astype(np.float32).astype(float) @ R.T + t
+
+    def close(self):
+        pass
+
+
+def rotate_xy(p: np.ndarray, rot: tuple | None) -> np.ndarray:
+    """Аугментация «поворот облака вокруг вертикали»: rot = (градусы, cx, cy)."""
+    if not rot or not rot[0]:
+        return p
+    a = math.radians(rot[0])
+    c, s_ = math.cos(a), math.sin(a)
+    x, y = p[:, 0] - rot[1], p[:, 1] - rot[2]
+    p = p.copy()
+    p[:, 0], p[:, 1] = rot[1] + c * x - s_ * y, rot[2] + s_ * x + c * y
+    return p
+
+
 def rasterize_e57(path, px: float = PIXEL_M, levels: list | None = None, thin: float = 0.0,
                   z_shift: float = 0.0, seed: int = 0, chunk: int = 2_000_000,
                   sample_points: int = 3_000_000, log=print) -> list[dict]:
     """E57 (сведённый или по станциям) -> по уровню: {"level", "frame", "input" [8, H, W] float16}.
     levels - пол и потолок уровней (иначе detect_levels по выборке); thin - доля точек,
     выбрасываемых случайно; z_shift - сдвиг облака по z (аугментация «пол ±1 см»)."""
-    from .e57read import E57Reader
-    from .floorplan import _scan_points
+    src = E57Source(path, chunk)
+    try:
+        return rasterize_points(src, px, levels, thin, z_shift, seed, sample_points, log=log)
+    finally:
+        src.close()
+
+
+def rasterize_points(src, px: float = PIXEL_M, levels: list | None = None, thin: float = 0.0,
+                     z_shift: float = 0.0, seed: int = 0, sample_points: int = 3_000_000,
+                     rot: tuple | None = None, log=print) -> list[dict]:
+    """Растеризатор входа сети по источнику точек (E57Source, MemorySource). Один и тот же
+    код для реальных файлов и синтетики. rot - поворот облака (градусы, cx, cy)."""
     from .rasterize import detect_levels, floor_ceiling
 
     rng = np.random.default_rng(seed)
-    with E57Reader(path) as r:
-        total = sum(s.points for s in r.scans)
-        p_keep = min(1.0, sample_points / max(total, 1))
-        sample = []
-        for i in range(len(r.scans)):
-            for p in _scan_points(r, i, chunk):
-                sample.append(p[rng.random(len(p)) < p_keep].astype(np.float32))
-        sample = np.concatenate(sample).astype(float)
-        sample[:, 2] += z_shift
-        st = station_positions(r)
-        if levels is None:
-            levels = detect_levels(sample, stations_z=st[:, 2] + z_shift)
-            if not levels:
-                fl, ce = floor_ceiling(sample[:, 2])
-                levels = [{"floor_z": fl, "ceiling_z": ce, "height_m": ce - fl}]
-        acc = []
-        for lv in levels:
-            top = lv["ceiling_z"] - lv["floor_z"]
-            m = frame_points(sample, [lv], st)
-            fr = _frame_from_points(sample[m, :2], px)
-            H, W = fr["height"], fr["width"]
-            nz = max(1, int(math.floor((top - 2 * BAND_MARGIN_M) / Z_BIN_M)))
-            acc.append({"level": lv, "frame": fr, "nz": nz, "top": top,
-                        "vox": np.zeros(H * W * nz, np.uint16), "floor": np.zeros(H * W, bool),
-                        "ceil": np.zeros(H * W, bool), "below": np.zeros(H * W, bool),
-                        "count": np.zeros(H * W, np.int64)})
-        log(f"уровней {len(levels)}: " + ", ".join(f"{a['frame']['width']}x{a['frame']['height']}" for a in acc))
-        for i in range(len(r.scans)):
-            for p in _scan_points(r, i, chunk):
-                if thin > 0:
-                    p = p[rng.random(len(p)) >= thin]
-                p = p.astype(float)
-                p[:, 2] += z_shift
-                for a in acc:
-                    fr, lv = a["frame"], a["level"]
-                    H, W, nz = fr["height"], fr["width"], a["nz"]
-                    j = np.floor((p[:, 0] - fr["origin_x"]) / px).astype(np.int64)
-                    ii = H - 1 - np.floor((p[:, 1] - fr["origin_y"]) / px).astype(np.int64)
-                    ok = (ii >= 0) & (ii < H) & (j >= 0) & (j < W)
-                    h = p[:, 2] - lv["floor_z"]
-                    flat = ii * W + j
-                    a["floor"][flat[ok & (np.abs(h) < FLOOR_TOL_M)]] = True
-                    a["ceil"][flat[ok & (np.abs(h - a["top"]) < FLOOR_TOL_M)]] = True
-                    a["below"][flat[ok & (h < -BAND_MARGIN_M) & (h > -BELOW_DEPTH_M)]] = True
-                    inner = ok & (h > FLOOR_TOL_M) & (h < a["top"] - FLOOR_TOL_M)
-                    a["count"] += np.bincount(flat[inner], minlength=H * W)
-                    k = np.floor((h - BAND_MARGIN_M) / Z_BIN_M).astype(np.int64)
-                    band = ok & (k >= 0) & (k < nz)
-                    u, c = np.unique(flat[band] * nz + k[band], return_counts=True)
-                    a["vox"][u] = np.minimum(a["vox"][u].astype(np.int64) + c, 65535).astype(np.uint16)
+    p_keep = min(1.0, sample_points / max(src.total, 1))
+    sample = []
+    for p in src.chunks():
+        sample.append(p[rng.random(len(p)) < p_keep].astype(np.float32))
+    sample = rotate_xy(np.concatenate(sample).astype(float), rot)
+    sample[:, 2] += z_shift
+    st = rotate_xy(src.stations, rot) if len(src.stations) else src.stations
+    if levels is None:
+        levels = detect_levels(sample, stations_z=st[:, 2] + z_shift)
+        if not levels:
+            fl, ce = floor_ceiling(sample[:, 2])
+            levels = [{"floor_z": fl, "ceiling_z": ce, "height_m": ce - fl}]
+    acc = []
+    for lv in levels:
+        top = lv["ceiling_z"] - lv["floor_z"]
+        m = frame_points(sample, [lv], st)
+        fr = _frame_from_points(sample[m, :2], px)
+        H, W = fr["height"], fr["width"]
+        nz = max(1, int(math.floor((top - 2 * BAND_MARGIN_M) / Z_BIN_M)))
+        acc.append({"level": lv, "frame": fr, "nz": nz, "top": top,
+                    "vox": np.zeros(H * W * nz, np.uint16), "floor": np.zeros(H * W, bool),
+                    "ceil": np.zeros(H * W, bool), "below": np.zeros(H * W, bool),
+                    "count": np.zeros(H * W, np.int64)})
+    log(f"уровней {len(levels)}: " + ", ".join(f"{a['frame']['width']}x{a['frame']['height']}" for a in acc))
+    for p in src.chunks():
+        if thin > 0:
+            p = p[rng.random(len(p)) >= thin]
+        p = rotate_xy(p.astype(float), rot)
+        p[:, 2] += z_shift
+        for a in acc:
+            fr, lv = a["frame"], a["level"]
+            H, W, nz = fr["height"], fr["width"], a["nz"]
+            j = np.floor((p[:, 0] - fr["origin_x"]) / px).astype(np.int64)
+            ii = H - 1 - np.floor((p[:, 1] - fr["origin_y"]) / px).astype(np.int64)
+            ok = (ii >= 0) & (ii < H) & (j >= 0) & (j < W)
+            h = p[:, 2] - lv["floor_z"]
+            flat = ii * W + j
+            a["floor"][flat[ok & (np.abs(h) < FLOOR_TOL_M)]] = True
+            a["ceil"][flat[ok & (np.abs(h - a["top"]) < FLOOR_TOL_M)]] = True
+            a["below"][flat[ok & (h < -BAND_MARGIN_M) & (h > -BELOW_DEPTH_M)]] = True
+            inner = ok & (h > FLOOR_TOL_M) & (h < a["top"] - FLOOR_TOL_M)
+            a["count"] += np.bincount(flat[inner], minlength=H * W)
+            k = np.floor((h - BAND_MARGIN_M) / Z_BIN_M).astype(np.int64)
+            band = ok & (k >= 0) & (k < nz)
+            u, c = np.unique(flat[band] * nz + k[band], return_counts=True)
+            a["vox"][u] = np.minimum(a["vox"][u].astype(np.int64) + c, 65535).astype(np.uint16)
     out = []
     for a in acc:
         fr, nz = a["frame"], a["nz"]
@@ -256,16 +317,18 @@ class SceneGT:
         self.A = np.eye(2) if A is None else np.asarray(A, float)
         self.floor_z = float(self.world.offset[2]) + float(lv.get("z0", 0.0))
         self.ceiling_h = float(self.layout.ceiling_height)
+        self.rot = None                    # аугментация: облако повёрнуто (градусы, cx, cy)
 
     def xy(self, pts) -> np.ndarray:
         """План (x, y) -> мир (x, y)."""
         p = np.atleast_2d(np.asarray(pts, float))[:, :2] @ self.A.T
-        return self.world.to_world(np.c_[p, np.zeros(len(p))])[:, :2]
+        return rotate_xy(self.world.to_world(np.c_[p, np.zeros(len(p))])[:, :2], self.rot)
 
     def stations(self) -> np.ndarray:
         """Стоянки этого этажа (мир)."""
-        return np.array([s["pose_true"]["t"] for s in self.doc.get("stations", [])
-                         if s.get("level", 0) == self.level], float).reshape(-1, 3)
+        st = np.array([s["pose_true"]["t"] for s in self.doc.get("stations", [])
+                       if s.get("level", 0) == self.level], float).reshape(-1, 3)
+        return rotate_xy(st, self.rot) if len(st) else st
 
     # стена: прямоугольник по оси s и смещению поперёк (в СК плана) -> мир
     def wall_quad(self, w, s0, s1, o0, o1) -> np.ndarray:
@@ -480,32 +543,47 @@ def write_meta(root: Path) -> None:
 
 
 def build_scene(scene_dir, root, px: float = PIXEL_M, use_gt_levels: bool = False, thin: float = 0.0,
-                z_shift: float = 0.0, splits: bool = True, log=print) -> list[str]:
-    """Сцена генератора -> dataset/scenes/<scene>/<level>/. Вход - из scan.e57 тем же
-    растеризатором, что и для реальных файлов; уровни - detect_levels, как у реальных (или
-    эталонные, use_gt_levels). thin, z_shift - аугментации облака (см. rasterize_e57);
-    splits=False - не трогать splits/*.txt (их ведёт вызывающий, напр. при параллельной сборке).
+                z_shift: float = 0.0, splits: bool = True, source=None, rot_deg: float = 0.0,
+                variant: str = "", log=print) -> list[str]:
+    """Сцена генератора -> dataset/scenes/<scene><variant>/<level>/. Вход - тем же
+    растеризатором, что и для реальных файлов (из scan.e57 или, без записи на диск, из
+    source=MemorySource); уровни - detect_levels, как у реальных (или эталонные, use_gt_levels).
+    thin, z_shift, rot_deg - аугментации облака; variant - суффикс каталога для нескольких
+    растров одного скана. splits=False - не трогать splits/*.txt (их ведёт вызывающий).
     Возвращает записанные каталоги."""
     root = Path(root)
     write_meta(root)
     gt0 = SceneGT(scene_dir)
     gts = [gt0] + [SceneGT(scene_dir, k) for k in range(1, len(gt0.levels))]
-    e57 = gt0.dir / "scan.e57"
-    if not e57.exists():
-        e57 = gt0.dir / "scan_merged.e57"
-    levels = [{"floor_z": g.floor_z, "ceiling_z": g.floor_z + g.ceiling_h, "height_m": g.ceiling_h} for g in gts] \
-        if use_gt_levels else None
+    levels = [{"floor_z": g.floor_z + z_shift, "ceiling_z": g.floor_z + z_shift + g.ceiling_h,
+               "height_m": g.ceiling_h} for g in gts] if use_gt_levels else None
     meta = gt0.doc.get("meta", {})
     seed, index = meta.get("seed", 0), meta.get("index", 0)
-    res = rasterize_e57(e57, px=px, levels=levels, thin=thin, z_shift=z_shift,
-                        seed=int(seed) * 1000 + int(index), log=log)
+    own = source is None
+    if own:
+        e57 = gt0.dir / "scan.e57"
+        source = E57Source(e57 if e57.exists() else gt0.dir / "scan_merged.e57")
+    rot = None
+    if rot_deg:
+        st = np.array([s_["pose_true"]["t"] for s_ in gt0.doc.get("stations", [])], float).reshape(-1, 3)
+        rot = (float(rot_deg), float(st[:, 0].mean()), float(st[:, 1].mean()))
+    for g in gts:
+        g.rot = rot
+    try:
+        res = rasterize_points(source, px=px, levels=levels, thin=thin, z_shift=z_shift,
+                               seed=int(seed) * 1000 + int(index) + zlib.crc32(variant.encode()) % 1000, rot=rot, log=log)
+    finally:
+        if own:
+            source.close()
+    for g in gts:                                  # пол в растре сдвинут вместе с облаком
+        g.floor_z += z_shift
     # каждому этажу эталона - ближайший по полу найденный уровень (не дальше 0,5 м)
     pairs = []
     for g in gts:
         r = min(res, key=lambda r: abs(r["level"]["floor_z"] - g.floor_z))
         if abs(r["level"]["floor_z"] - g.floor_z) < 0.5 and all(r is not q for _, q in pairs):
             pairs.append((g, r))
-    scene_id = gt0.dir.name
+    scene_id = gt0.dir.name + variant
     out_dirs = []
     for k, (gt, r) in enumerate(pairs):
         d = root / "scenes" / scene_id / f"L{gt.level + 1}"
@@ -525,7 +603,7 @@ def build_scene(scene_dir, root, px: float = PIXEL_M, use_gt_levels: bool = Fals
               "floor_z": r["level"]["floor_z"], "ceiling_z": r["level"]["ceiling_z"],
               "floor_z_gt": gt.floor_z, "ceiling_z_gt": gt.floor_z + gt.ceiling_h,
               "frame": r["frame"], "pixel_to_world": affine(r["frame"]), "rasterizer": RASTERIZER_VERSION,
-              "bare": meta.get("bare"), "aug": {"thin": thin, "z_shift": z_shift}}
+              "bare": meta.get("bare"), "aug": {"thin": thin, "z_shift": z_shift, "rot_deg": rot_deg}}
         (d / "scene.json").write_text(json.dumps(sc, indent=1, ensure_ascii=False, default=float), encoding="utf-8")
         _preview(r["input"].astype(np.float32), lab["sem_raw"], d / "preview.png")
         out_dirs.append(str(d))

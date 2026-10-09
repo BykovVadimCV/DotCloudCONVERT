@@ -63,7 +63,10 @@ def make_layout(cfg: SynthConfig, rng: np.random.Generator, seed: int, index: in
     raise ValueError(f"неизвестный layout.source: {lc.source}")
 
 
-def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: int = 0) -> dict:
+def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: int = 0,
+                   write_scan: bool = True) -> dict:
+    """write_scan=False - scan.e57 и метки точек не пишутся, сканы с записанными позами
+    возвращаются в summary["_scans"] = (scans, poses) (make-dataset растеризует их из памяти)."""
     t_start = time.perf_counter()
     rng = scene_rng(seed, index)
     out = Path(out_dir)
@@ -150,7 +153,8 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
         })
 
     names = [f"Station_{s.id + 1:03d}" for s in stations]
-    masks_written = write_e57(out / "scan.e57", scans, poses, names, cfg.effects.keep_invalid)
+    masks_written = write_e57(out / "scan.e57", scans, poses, names, cfg.effects.keep_invalid) \
+        if write_scan else []
     for scan, written in zip(scans, masks_written):
         np.savez_compressed(
             out / "labels" / f"scan_{scan.station_id:03d}.npz",
@@ -158,7 +162,7 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
             virtual=scan.virtual[written], mixed=scan.mixed[written],
             valid=scan.valid[written], row=scan.row[written], col=scan.col[written])
 
-    if ex.write_merged:
+    if ex.write_merged and write_scan:
         pts, inten = [], []
         for scan, (R, t) in zip(scans, poses):
             v = scan.valid
@@ -203,9 +207,9 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
     summary = {"dir": str(out), "levels": 2 if duplex else 1, "rooms": len(layout.rooms), "stations": len(stations),
                "openings": len(layout.openings), "items": len(layout.items),
                "points_valid": int(sum(s.n_valid for s in scans))}
-    if ex.preview:
+    if ex.preview and write_scan:
         summary.update(render_preview(out / "scan.e57", masks, frame, world, out / "preview.png"))
-    if ex.free_space_input and ex.unet_mask:
+    if ex.free_space_input and ex.unet_mask and write_scan:
         from .rasterize import make_pair
 
         pair = make_pair(out, figure=ex.debug)
@@ -215,6 +219,8 @@ def generate_scene(cfg: SynthConfig, out_dir: str | Path, seed: int = 0, index: 
 
         debug_scene(out)
     summary["seconds"] = round(time.perf_counter() - t_start, 2)
+    if not write_scan:
+        summary["_scans"] = (scans, poses)
     return summary
 
 
